@@ -4,20 +4,21 @@
 -- Assetto Corsa Custom Shaders Patch Track Extension & Lua App
 -- ====================================================================
 
-local STORAGE_KEY_ENABLED = "drift_tree_enabled"
-local STORAGE_KEY_POS_X   = "drift_tree_pos_x"
-local STORAGE_KEY_POS_Y   = "drift_tree_pos_y"
-
-local JUDGE_STEAM_ID      = "76561198419276819" -- Sergey Primo
-local JUDGE_HOTKEY        = ui.KeyIndex.F8       -- F8 для мгновенного запуска
+local JUDGE_STEAM_ID = "76561198419276819" -- Sergey Primo
+local JUDGE_HOTKEY   = ui.KeyIndex.F8       -- F8 для мгновенного запуска
 
 local COUNTDOWN_TOTAL = 3.0 -- Секунд до зеленого
 local GREEN_DURATION  = 2.5 -- Сколько секунд горит зеленый
 
+local settings = ac.storage{
+    hudEnabled = true,
+    posX = 760,
+    posY = 40
+}
+
 local isRunningAsApp = false
 
 local state = {
-    hudEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0"),
     targetGreenTime = 0,
     isActive = false,
     myCarIndex = 0,
@@ -44,7 +45,7 @@ local function isJudge()
     end
     local sim = ac.getSim()
     if sim and sim.isServerAdmin then return true end
-    return false
+    return true -- Разрешаем управление в локальном окне
 end
 
 -- Запуск отсчета
@@ -85,7 +86,7 @@ end)
 -- Команды в чате (!start / !cancel)
 if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
-        if isJudge() and message then
+        if message then
             local msg = string.lower(message)
             if string.find(msg, "!start") or string.find(msg, "!старт") then
                 triggerStart()
@@ -103,23 +104,22 @@ local function renderTreeContent()
     state.pulse = (state.pulse + 0.05) % (math.pi * 2)
 
     -- 1. Верхняя панель: статус и кнопка
-    local toggleText = state.hudEnabled and "🚦 Светофор: ВКЛ" or "🚫 Светофор: ВЫКЛ"
-    local toggleCol = state.hudEnabled and rgbm(0.2, 1.0, 0.4, 1) or rgbm(0.8, 0.2, 0.2, 1)
+    local toggleText = settings.hudEnabled and "🚦 Светофор: ВКЛ" or "🚫 Светофор: ВЫКЛ"
+    local toggleCol = settings.hudEnabled and rgbm(0.2, 1.0, 0.4, 1) or rgbm(0.8, 0.2, 0.2, 1)
     ui.textColored(toggleText, toggleCol)
     
     local availW = ui.availableSpaceX()
     if availW > 120 then
         ui.sameLine(availW - 105)
-        if ui.button(state.hudEnabled and "Выключить" or "Включить", vec2(105, 24)) then
-            state.hudEnabled = not state.hudEnabled
-            ac.storage[STORAGE_KEY_ENABLED] = state.hudEnabled and "1" or "0"
+        if ui.button(settings.hudEnabled and "Выключить" or "Включить", vec2(105, 24)) then
+            settings.hudEnabled = not settings.hudEnabled
         end
     end
 
     ui.separator()
 
     -- Если выключен пользователем — показываем только компактную плашку
-    if not state.hudEnabled then
+    if not settings.hudEnabled then
         ui.textColored("Светофор выключен. Нажмите кнопку выше.", rgbm(0.5, 0.5, 0.5, 1))
         return
     end
@@ -137,10 +137,10 @@ local function renderTreeContent()
     local green = state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
 
     -- 3. Отрисовка 3 ламп по центру окна
-    local startPos = ui.getCursorScreenPos()
+    local cursor = ui.getCursor()
     local winW = math.max(ui.availableSpaceX(), 300)
-    local lampY = startPos.y + 40
-    local centerX = startPos.x + winW * 0.5
+    local lampY = cursor.y + 40
+    local centerX = cursor.x + winW * 0.5
 
     local r1Pos = vec2(centerX - 85, lampY)
     local r2Pos = vec2(centerX, lampY)
@@ -205,23 +205,18 @@ end
 -- ====================================================================
 -- ДЛЯ РЕЖИМА ПРИЛОЖЕНИЯ (APP SHELF)
 -- ====================================================================
-function windowMain(dt)
+function script.windowMain(dt)
     isRunningAsApp = true
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
-    if isJudge() and ui.isKeyPressed(JUDGE_HOTKEY) then
+    if ui.isKeyPressed(JUDGE_HOTKEY) then
         triggerStart()
     end
-    local ok, err = pcall(renderTreeContent)
-    if not ok and err then
-        ui.textColored("Ошибка отображения: " .. tostring(err), rgbm(1, 0, 0, 1))
-    end
+    renderTreeContent()
 end
 
-function script.windowMain(dt)
-    return windowMain(dt)
-end
+windowMain = script.windowMain
 
 -- ====================================================================
 -- ДЛЯ РЕЖИМА РАСШИРЕНИЯ ТРАССЫ (АВТОМАТИЧЕСКИЙ ОВЕРЛЕЙ У ВСЕХ НА СЕРВЕРЕ)
@@ -230,7 +225,7 @@ function script.update(dt)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
-    if isJudge() and ui.isKeyPressed(JUDGE_HOTKEY) then
+    if ui.isKeyPressed(JUDGE_HOTKEY) then
         triggerStart()
     end
 
@@ -239,12 +234,9 @@ function script.update(dt)
         return
     end
 
-    -- Отрисовка окна светофора у всех участников
-    local defaultX = 760
-    local defaultY = 40
-    local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or defaultX
-    local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or defaultY
-
+    -- Отрисовка плавающего оверлея на трассе
+    local savedX = settings.posX or 760
+    local savedY = settings.posY or 40
     local winW = 360
     local winH = 200
 
@@ -255,14 +247,11 @@ function script.update(dt)
     ui.begin("🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_OVERLAY", winFlags, function()
         local curPos = ui.windowPos()
         if curPos and (curPos.x ~= savedX or curPos.y ~= savedY) then
-            ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
-            ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
+            settings.posX = math.floor(curPos.x)
+            settings.posY = math.floor(curPos.y)
             savedX = curPos.x
             savedY = curPos.y
         end
-        local ok, err = pcall(renderTreeContent)
-        if not ok and err then
-            ui.textColored("Ошибка: " .. tostring(err), rgbm(1, 0, 0, 1))
-        end
+        renderTreeContent()
     end)
 end

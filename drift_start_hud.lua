@@ -5,6 +5,9 @@
 -- ====================================================================
 
 local STORAGE_KEY_ENABLED = "drift_tree_enabled"
+local STORAGE_KEY_POS_X   = "drift_tree_pos_x"
+local STORAGE_KEY_POS_Y   = "drift_tree_pos_y"
+
 local JUDGE_STEAM_ID      = "76561198419276819" -- Sergey Primo
 local JUDGE_HOTKEY        = ui.KeyIndex.F8       -- F8 для мгновенного запуска
 
@@ -19,7 +22,8 @@ local state = {
     isActive = false,
     myCarIndex = 0,
     mySteamID = "",
-    myDriverName = ""
+    myDriverName = "",
+    pulse = 0
 }
 
 -- Инициализация локального игрока
@@ -96,8 +100,10 @@ end
 -- ОСНОВНОЙ РЕНДЕР СОДЕРЖИМОГО СВЕТОФОРА
 -- ====================================================================
 local function renderTreeContent()
+    state.pulse = (state.pulse + 0.05) % (math.pi * 2)
+
     -- 1. Верхняя панель: статус и кнопка
-    local toggleText = state.hudEnabled and "Светофор: ВКЛЮЧЕН" or "Светофор: ВЫКЛЮЧЕН"
+    local toggleText = state.hudEnabled and "🚦 Светофор: ВКЛ" or "🚫 Светофор: ВЫКЛ"
     local toggleCol = state.hudEnabled and rgbm(0.2, 1.0, 0.4, 1) or rgbm(0.8, 0.2, 0.2, 1)
     ui.textColored(toggleText, toggleCol)
     
@@ -111,6 +117,12 @@ local function renderTreeContent()
     end
 
     ui.separator()
+
+    -- Если выключен пользователем — показываем только компактную плашку
+    if not state.hudEnabled then
+        ui.textColored("Светофор скрыт. Нажмите 'Включить' выше.", rgbm(0.5, 0.5, 0.5, 1))
+        return
+    end
 
     -- 2. Расчет времени
     local simTime = ac.getSim().time
@@ -126,35 +138,35 @@ local function renderTreeContent()
 
     -- 3. Отрисовка 3 ламп по центру окна
     local startPos = ui.getCursorScreenPos()
-    local winW = math.max(ui.availableSpaceX(), 300)
-    local lampY = startPos.y + 42
+    local winW = math.max(ui.availableSpaceX(), 320)
+    local lampY = startPos.y + 40
     local centerX = startPos.x + winW * 0.5
 
-    local r1Pos = vec2(centerX - 85, lampY)
+    local r1Pos = vec2(centerX - 90, lampY)
     local r2Pos = vec2(centerX, lampY)
-    local gPos  = vec2(centerX + 85, lampY)
+    local gPos  = vec2(centerX + 90, lampY)
     local radius = 28
 
     -- Лампа 1 (Красный)
-    local colR1 = red1 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.4)
+    local colR1 = red1 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.45)
     ui.drawCircleFilled(r1Pos, radius, colR1)
-    ui.drawCircle(r1Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 2)
+    ui.drawCircle(r1Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
     if red1 then ui.drawCircleFilled(r1Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35)) end
 
     -- Лампа 2 (Красный)
-    local colR2 = red2 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.4)
+    local colR2 = red2 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.45)
     ui.drawCircleFilled(r2Pos, radius, colR2)
-    ui.drawCircle(r2Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 2)
+    ui.drawCircle(r2Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
     if red2 then ui.drawCircleFilled(r2Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35)) end
 
     -- Лампа 3 (Зеленый)
-    local colG = green and rgbm(0.05, 1.0, 0.25, 1.0) or rgbm(0.03, 0.25, 0.05, 0.4)
+    local colG = green and rgbm(0.05, 1.0, 0.25, 1.0) or rgbm(0.03, 0.25, 0.05, 0.45)
     ui.drawCircleFilled(gPos, radius, colG)
-    ui.drawCircle(gPos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 2)
+    ui.drawCircle(gPos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
     if green then ui.drawCircleFilled(gPos, radius + 7, rgbm(0.1, 1.0, 0.2, 0.45)) end
 
     -- Отступ под лампы
-    ui.dummy(vec2(0, 85))
+    ui.dummy(vec2(0, 80))
 
     -- 4. Текстовый статус под лампами
     local statusStr = "ОЖИДАНИЕ СТАРТА"
@@ -181,11 +193,11 @@ local function renderTreeContent()
     local spaceW = ui.availableSpaceX()
     local btnW = math.max((spaceW - 12) * 0.5, 80)
 
-    if ui.button("▶ СТАРТ (F8)", vec2(btnW, 38)) then
+    if ui.button("▶ СТАРТ (F8)", vec2(btnW, 36)) then
         triggerStart()
     end
     ui.sameLine()
-    if ui.button("✖ СБРОС", vec2(btnW, 38)) then
+    if ui.button("✖ СБРОС", vec2(btnW, 36)) then
         cancelStart()
     end
 end
@@ -205,7 +217,7 @@ function script.windowMain(dt)
 end
 
 -- ====================================================================
--- ДЛЯ РЕЖИМА РАСШИРЕНИЯ ТРАССЫ (TRACK SCRIPT OVERLAY)
+-- ДЛЯ РЕЖИМА РАСШИРЕНИЯ ТРАССЫ (АВТОМАТИЧЕСКИЙ ОВЕРЛЕЙ У ВСЕХ НА СЕРВЕРЕ)
 -- ====================================================================
 function script.update(dt)
     if not state.myDriverName or state.myDriverName == "" then
@@ -215,27 +227,32 @@ function script.update(dt)
         triggerStart()
     end
 
-    -- Если приложение уже открыто пользователем в окне, не дублируем оверлей
+    -- Если окно уже открыто в виде приложения из правого меню, не дублируем
     if isRunningAsApp then
         return
     end
 
-    -- Оверлей по центру экрана во время отсчета
-    local simTime = ac.getSim().time
-    local timeLeft = state.targetGreenTime - simTime
+    -- Отрисовка окна светофора у всех участников
+    local defaultX = 760
+    local defaultY = 40
+    local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or defaultX
+    local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or defaultY
 
-    if state.isActive and state.hudEnabled and timeLeft > -GREEN_DURATION then
-        local screenSize = ui.windowSize()
-        local winW = 340
-        local winH = 200
-        local centerPos = vec2((screenSize.x - winW) * 0.5, screenSize.y * 0.18)
+    local winW = 360
+    local winH = 200
 
-        ui.setNextWindowPos(centerPos)
-        ui.setNextWindowSize(vec2(winW, winH))
+    ui.setNextWindowPosition(vec2(savedX, savedY))
+    ui.setNextWindowSize(vec2(winW, winH))
 
-        local flags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
-        ui.begin("🚦 СВЕТОФОР##TRACK_OVERLAY", flags, function()
-            renderTreeContent()
-        end)
-    end
+    local winFlags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
+    ui.begin("🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_OVERLAY", winFlags, function()
+        local curPos = ui.windowPos()
+        if curPos and (curPos.x ~= savedX or curPos.y ~= savedY) then
+            ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
+            ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
+            savedX = curPos.x
+            savedY = curPos.y
+        end
+        renderTreeContent()
+    end)
 end

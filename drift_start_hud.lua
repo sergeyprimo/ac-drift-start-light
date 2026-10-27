@@ -5,7 +5,7 @@
 -- ====================================================================
 
 local JUDGE_STEAM_ID = "76561198419276819" -- Sergey Primo
-local JUDGE_HOTKEY   = ui.KeyIndex.F8       -- F8 для мгновенного запуска
+local JUDGE_HOTKEY   = ui.KeyIndex and ui.KeyIndex.F8 or 119 -- F8
 
 local COUNTDOWN_TOTAL = 3.0 -- Секунд до зеленого
 local GREEN_DURATION  = 2.5 -- Сколько секунд горит зеленый
@@ -45,7 +45,7 @@ local function isJudge()
     end
     local sim = ac.getSim()
     if sim and sim.isServerAdmin then return true end
-    return true -- Разрешаем управление в локальном окне
+    return true
 end
 
 -- Запуск отсчета
@@ -118,7 +118,7 @@ local function renderTreeContent()
 
     ui.separator()
 
-    -- Если выключен пользователем — показываем только компактную плашку
+    -- Если выключен пользователем
     if not settings.hudEnabled then
         ui.textColored("Светофор выключен. Нажмите кнопку выше.", rgbm(0.5, 0.5, 0.5, 1))
         return
@@ -210,10 +210,13 @@ function script.windowMain(dt)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
-    if ui.isKeyPressed(JUDGE_HOTKEY) then
+    if ui.keyboardButtonPressed and ui.keyboardButtonPressed(JUDGE_HOTKEY) then
         triggerStart()
     end
-    renderTreeContent()
+    local ok, err = pcall(renderTreeContent)
+    if not ok and err then
+        ui.textColored("Ошибка: " .. tostring(err), rgbm(1, 0, 0, 1))
+    end
 end
 
 windowMain = script.windowMain
@@ -225,7 +228,7 @@ function script.update(dt)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
-    if ui.isKeyPressed(JUDGE_HOTKEY) then
+    if ui.keyboardButtonPressed and ui.keyboardButtonPressed(JUDGE_HOTKEY) then
         triggerStart()
     end
 
@@ -252,6 +255,9 @@ function script.update(dt)
             savedX = curPos.x
             savedY = curPos.y
         end
-        renderTreeContent()
+        local ok, err = pcall(renderTreeContent)
+        if not ok and err then
+            ui.textColored("Ошибка: " .. tostring(err), rgbm(1, 0, 0, 1))
+        end
     end)
 end

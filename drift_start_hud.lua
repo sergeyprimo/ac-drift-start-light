@@ -2,10 +2,9 @@
 -- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА)
 -- Официальный трековый модуль для соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
 -- Assetto Corsa Custom Shaders Patch
--- Версия: 2.2 (Track Extension Auto-HUD)
+-- Версия: 2.3 (Track Extension Auto-HUD)
 -- ====================================================================
 
-local JUDGE_STEAM_ID = "76561198419276819" -- Sergey Primo
 local COUNTDOWN_TOTAL = 3.0 -- 3 секунды отсчета
 local GREEN_DURATION  = 2.5 -- 2.5 секунды горит зеленый
 
@@ -21,7 +20,6 @@ local state = {
     targetGreenTime = 0,
     isActive = false,
     myCarIndex = 0,
-    mySteamID = "",
     myDriverName = "",
     pulse = 0
 }
@@ -30,21 +28,25 @@ local state = {
 local function initPlayer()
     local sim = ac.getSim()
     state.myCarIndex = (sim and sim.focusedCar) or 0
-    state.mySteamID = ac.getDriverSteamID(state.myCarIndex) or ""
-    state.myDriverName = ac.getDriverName(state.myCarIndex) or ""
+    if ac.getDriverName then
+        state.myDriverName = ac.getDriverName(state.myCarIndex) or ""
+    end
 end
 
 -- Проверка прав судьи
 local function isJudge()
-    if state.mySteamID == "" then initPlayer() end
     local sim = ac.getSim()
-    if sim and not sim.isOnlineRace then return true end -- Одиночный заезд / практика
-    if state.mySteamID == JUDGE_STEAM_ID then return true end
+    if not sim or not sim.isOnlineRace then return true end -- Одиночный заезд / практика / тренировка
+    if sim.isServerAdmin then return true end
+
+    if not state.myDriverName or state.myDriverName == "" then
+        initPlayer()
+    end
+
     local nameLower = string.lower(state.myDriverName or "")
-    if string.find(nameLower, "sergey") or string.find(nameLower, "primo") then
+    if string.find(nameLower, "sergey") or string.find(nameLower, "primo") or string.find(nameLower, "сергей") then
         return true
     end
-    if sim and sim.isServerAdmin then return true end
     return false
 end
 
@@ -95,12 +97,11 @@ if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
         local msg = string.lower(message)
-        local senderSteamID = (senderCarIndex and ac.getDriverSteamID(senderCarIndex)) or ""
-        local senderName = string.lower((senderCarIndex and ac.getDriverName(senderCarIndex)) or "")
+        local senderName = string.lower((senderCarIndex and ac.getDriverName and ac.getDriverName(senderCarIndex)) or "")
 
-        local allowed = (senderSteamID == JUDGE_STEAM_ID)
-            or string.find(senderName, "sergey")
+        local allowed = string.find(senderName, "sergey")
             or string.find(senderName, "primo")
+            or string.find(senderName, "сергей")
             or isJudge()
 
         if allowed then
@@ -365,4 +366,4 @@ function script.update(dt)
     renderFloatingHUD()
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v2.2")
+ac.log("[DriftStartTree] Track Extension HUD loaded v2.3")

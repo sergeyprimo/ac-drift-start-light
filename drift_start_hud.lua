@@ -120,7 +120,7 @@ local function renderTreeContent()
 
     -- Если выключен пользователем — показываем только компактную плашку
     if not state.hudEnabled then
-        ui.textColored("Светофор скрыт. Нажмите 'Включить' выше.", rgbm(0.5, 0.5, 0.5, 1))
+        ui.textColored("Светофор выключен. Нажмите кнопку выше.", rgbm(0.5, 0.5, 0.5, 1))
         return
     end
 
@@ -138,32 +138,32 @@ local function renderTreeContent()
 
     -- 3. Отрисовка 3 ламп по центру окна
     local startPos = ui.getCursorScreenPos()
-    local winW = math.max(ui.availableSpaceX(), 320)
+    local winW = math.max(ui.availableSpaceX(), 300)
     local lampY = startPos.y + 40
     local centerX = startPos.x + winW * 0.5
 
-    local r1Pos = vec2(centerX - 90, lampY)
+    local r1Pos = vec2(centerX - 85, lampY)
     local r2Pos = vec2(centerX, lampY)
-    local gPos  = vec2(centerX + 90, lampY)
-    local radius = 28
+    local gPos  = vec2(centerX + 85, lampY)
+    local radius = 26
 
     -- Лампа 1 (Красный)
     local colR1 = red1 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.45)
-    ui.drawCircleFilled(r1Pos, radius, colR1)
+    ui.drawCircleFilled(r1Pos, radius, colR1, 24)
     ui.drawCircle(r1Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
-    if red1 then ui.drawCircleFilled(r1Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35)) end
+    if red1 then ui.drawCircleFilled(r1Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35), 24) end
 
     -- Лампа 2 (Красный)
     local colR2 = red2 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.25, 0.03, 0.03, 0.45)
-    ui.drawCircleFilled(r2Pos, radius, colR2)
+    ui.drawCircleFilled(r2Pos, radius, colR2, 24)
     ui.drawCircle(r2Pos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
-    if red2 then ui.drawCircleFilled(r2Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35)) end
+    if red2 then ui.drawCircleFilled(r2Pos, radius + 5, rgbm(1.0, 0.0, 0.0, 0.35), 24) end
 
     -- Лампа 3 (Зеленый)
     local colG = green and rgbm(0.05, 1.0, 0.25, 1.0) or rgbm(0.03, 0.25, 0.05, 0.45)
-    ui.drawCircleFilled(gPos, radius, colG)
+    ui.drawCircleFilled(gPos, radius, colG, 24)
     ui.drawCircle(gPos, radius, rgbm(0.5, 0.5, 0.5, 0.8), 24, 2)
-    if green then ui.drawCircleFilled(gPos, radius + 7, rgbm(0.1, 1.0, 0.2, 0.45)) end
+    if green then ui.drawCircleFilled(gPos, radius + 7, rgbm(0.1, 1.0, 0.2, 0.45), 24) end
 
     -- Отступ под лампы
     ui.dummy(vec2(0, 80))
@@ -205,7 +205,7 @@ end
 -- ====================================================================
 -- ДЛЯ РЕЖИМА ПРИЛОЖЕНИЯ (APP SHELF)
 -- ====================================================================
-function script.windowMain(dt)
+function windowMain(dt)
     isRunningAsApp = true
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
@@ -213,7 +213,14 @@ function script.windowMain(dt)
     if isJudge() and ui.isKeyPressed(JUDGE_HOTKEY) then
         triggerStart()
     end
-    renderTreeContent()
+    local ok, err = pcall(renderTreeContent)
+    if not ok and err then
+        ui.textColored("Ошибка отображения: " .. tostring(err), rgbm(1, 0, 0, 1))
+    end
+end
+
+function script.windowMain(dt)
+    return windowMain(dt)
 end
 
 -- ====================================================================
@@ -253,6 +260,9 @@ function script.update(dt)
             savedX = curPos.x
             savedY = curPos.y
         end
-        renderTreeContent()
+        local ok, err = pcall(renderTreeContent)
+        if not ok and err then
+            ui.textColored("Ошибка: " .. tostring(err), rgbm(1, 0, 0, 1))
+        end
     end)
 end

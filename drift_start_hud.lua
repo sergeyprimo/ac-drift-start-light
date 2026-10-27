@@ -1,27 +1,23 @@
 -- ====================================================================
 -- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР)
 -- Разработано для ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
--- Assetto Corsa Custom Shaders Patch Track Extension
+-- Assetto Corsa Custom Shaders Patch Track Extension & Lua App
 -- ====================================================================
 
--- Ключи сохранения локальных настроек пилота
-local STORAGE_KEY_ENABLED = "drift_tree_hud_enabled"
 local STORAGE_KEY_POS_X   = "drift_tree_pos_x"
 local STORAGE_KEY_POS_Y   = "drift_tree_pos_y"
+local STORAGE_KEY_ENABLED = "drift_tree_enabled"
 
--- Идентификаторы судьи (Steam64 ID)
 local JUDGE_STEAM_ID = "76561198419276819" -- Sergey Primo
-local JUDGE_HOTKEY   = ui.KeyIndex.F8       -- Клавиша быстрого старта F8
+local JUDGE_HOTKEY   = ui.KeyIndex.F8       -- F8 для мгновенного запуска
 
--- Тайминги (в секундах)
-local COUNTDOWN_TOTAL = 3.0 -- Время подготовки (3 секунды)
-local GREEN_DURATION  = 2.5 -- Время свечения зеленого
+local COUNTDOWN_TOTAL = 3.0 -- Секунд до зеленого
+local GREEN_DURATION  = 2.5 -- Сколько секунд горит зеленый
 
--- ====================================================================
--- СОСТОЯНИЕ
--- ====================================================================
+local isRunningAsStandaloneApp = false
+
 local state = {
-    hudEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0"), -- По умолчанию ВКЛ
+    hudEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0"),
     targetGreenTime = 0,
     isActive = false,
     myCarIndex = 0,
@@ -38,26 +34,22 @@ local function initPlayer()
     state.myDriverName = ac.getDriverName(state.myCarIndex) or ""
 end
 
--- Проверка, является ли текущий игрок судьей/организатором
+-- Проверка прав судьи
 local function isJudge()
     if state.mySteamID == "" then initPlayer() end
     if state.mySteamID == JUDGE_STEAM_ID then return true end
-    if string.find(string.lower(state.myDriverName), "sergey") or string.find(string.lower(state.myDriverName), "primo") then
+    local nameLower = string.lower(state.myDriverName or "")
+    if string.find(nameLower, "sergey") or string.find(nameLower, "primo") then
         return true
     end
     return false
 end
 
--- ====================================================================
--- СЕТЕВАЯ СИНХРОНИЗАЦИЯ ЧЕРЕЗ CSP
--- ====================================================================
-
--- Запуск отсчета (вызывает судья)
+-- Запуск отсчета
 local function triggerStart()
     local simTime = ac.getSim().time
     local greenTimestamp = simTime + COUNTDOWN_TOTAL
 
-    -- Рассылаем синхронизированную метку времени всем участникам на сервере
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
         greenTime = greenTimestamp
     })
@@ -66,7 +58,7 @@ local function triggerStart()
     state.isActive = true
 end
 
--- Сброс/отмена старта (вызывает судья)
+-- Сброс отсчета
 local function cancelStart()
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
         greenTime = 0
@@ -75,7 +67,7 @@ local function cancelStart()
     state.isActive = false
 end
 
--- Прием сетевого события от судьи
+-- Прием события от судьи
 ac.onSharedEvent("DRIFT_START_SYNC", function(data)
     if data and data.greenTime then
         if data.greenTime == 0 then
@@ -88,14 +80,14 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
     end
 end)
 
--- Поддержка команд через игровой чат (!start / !cancel)
+-- Команды в чате (!start / !cancel)
 if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
-        if isJudge() then
-            local msg = string.lower(string.trim(message or ""))
-            if msg == "!start" or msg == "!старт" then
+        if isJudge() and message then
+            local msg = string.lower(message)
+            if string.find(msg, "!start") or string.find(msg, "!старт") then
                 triggerStart()
-            elseif msg == "!cancel" or msg == "!stop" or msg == "!стоп" or msg == "!сброс" then
+            elseif string.find(msg, "!cancel") or string.find(msg, "!сброс") or string.find(msg, "!stop") then
                 cancelStart()
             end
         end
@@ -103,177 +95,152 @@ if ac.onChatMessage then
 end
 
 -- ====================================================================
--- ОТРИСОВКА ИНТЕРФЕЙСА
+-- ОСНОВНОЙ РЕНДЕР ИНТЕРФЕЙСА
 -- ====================================================================
-local function renderTreeUI(dt)
-    state.pulse = (state.pulse + (dt or 0.016) * 6.0) % (math.pi * 2)
-    local screenSize = ui.windowSize()
+local function renderTreeHUD()
+    local defaultX = 760
+    local defaultY = 40
+    local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or defaultX
+    local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or defaultY
 
-    -- ----------------------------------------------------------------
-    -- 1. КНОПКА ВКЛЮЧЕНИЯ/ВЫКЛЮЧЕНИЯ ДЛЯ ВСЕХ ПИЛОТОВ (Правый верхний угол)
-    -- ----------------------------------------------------------------
-    ui.pushStyleVar(ui.StyleVar.WindowRounding, 8)
-    ui.pushStyleVar(ui.StyleVar.FrameRounding, 6)
+    ui.setNextWindowPos(vec2(savedX, savedY), ui.Cond.FirstUseEver)
 
-    local btnPos = vec2(screenSize.x - 200, 20)
-    ui.beginTransparentWindow("drift_tree_toggle_btn", btnPos, vec2(185, 42))
+    local winW = 380
+    local winH = isJudge() and 180 or 140
+    ui.setNextWindowSize(vec2(winW, winH), ui.Cond.FirstUseEver)
 
-    local statusText = state.hudEnabled and "🚦 Светофор: ВКЛ" or "🚫 Светофор: ВЫКЛ"
-    local btnCol = state.hudEnabled and rgbm(0.15, 0.4, 0.15, 0.8) or rgbm(0.4, 0.15, 0.15, 0.8)
-    local btnHover = state.hudEnabled and rgbm(0.2, 0.6, 0.2, 0.95) or rgbm(0.6, 0.2, 0.2, 0.95)
+    local winFlags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
 
-    ui.pushStyleColor(ui.Col.Button, btnCol)
-    ui.pushStyleColor(ui.Col.ButtonHovered, btnHover)
-    ui.pushStyleColor(ui.Col.Text, rgbm(1, 1, 1, 1))
+    ui.pushStyleVar(ui.StyleVar.WindowRounding, 10)
+    ui.pushStyleVar(ui.StyleVar.WindowBorderSize, 1.5)
+    ui.pushStyleColor(ui.StyleColor.WindowBg, rgbm(0.05, 0.06, 0.08, 0.95))
+    ui.pushStyleColor(ui.StyleColor.Border, rgbm(0.20, 0.55, 0.95, 0.8))
 
-    if ui.button(statusText, vec2(175, 34)) then
-        state.hudEnabled = not state.hudEnabled
-        ac.storage[STORAGE_KEY_ENABLED] = state.hudEnabled and "1" or "0"
-    end
+    local title = "🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_TREE"
 
-    ui.popStyleColor(3)
-    ui.endTransparentWindow()
-
-    -- ----------------------------------------------------------------
-    -- 2. СУДЕЙСКАЯ ПАНЕЛЬ УПРАВЛЕНИЯ (Только для Сергея Primo)
-    -- ----------------------------------------------------------------
-    if isJudge() then
-        -- Быстрый старт по клавише F8
-        if ui.isKeyPressed(JUDGE_HOTKEY) then
-            triggerStart()
+    ui.begin(title, winFlags, function()
+        -- Сохранение положения окна при перемещении пользователем
+        local curPos = ui.windowPos()
+        if curPos.x ~= savedX or curPos.y ~= savedY then
+            ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
+            ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
+            savedX = curPos.x
+            savedY = curPos.y
         end
 
-        local judgePos = vec2(screenSize.x - 200, 68)
-        ui.beginTransparentWindow("drift_judge_panel", judgePos, vec2(185, state.isActive and 95 or 55))
-
-        ui.pushStyleColor(ui.Col.Button, rgbm(0.1, 0.35, 0.7, 0.85))
-        ui.pushStyleColor(ui.Col.ButtonHovered, rgbm(0.2, 0.5, 0.9, 1))
-
-        if ui.button("▶ СТАРТ (F8)", vec2(175, 32)) then
-            triggerStart()
+        -- Верхняя строка: переключатель ВКЛ/ВЫКЛ
+        local toggleText = state.hudEnabled and "Светофор: ВКЛЮЧЕН" or "Светофор: ВЫКЛЮЧЕН"
+        local toggleCol = state.hudEnabled and rgbm(0.2, 1.0, 0.4, 1) or rgbm(0.7, 0.2, 0.2, 1)
+        ui.textColored(toggleText, toggleCol)
+        ui.sameLine(winW - 130)
+        if ui.button(state.hudEnabled and "Выключить" or "Включить", vec2(100, 22)) then
+            state.hudEnabled = not state.hudEnabled
+            ac.storage[STORAGE_KEY_ENABLED] = state.hudEnabled and "1" or "0"
         end
-        ui.popStyleColor(2)
 
-        if state.isActive then
-            ui.pushStyleColor(ui.Col.Button, rgbm(0.6, 0.1, 0.1, 0.85))
-            ui.pushStyleColor(ui.Col.ButtonHovered, rgbm(0.8, 0.15, 0.15, 1))
-            if ui.button("✖ СБРОС", vec2(175, 26)) then
+        ui.separator()
+
+        local simTime = ac.getSim().time
+        local timeLeft = state.targetGreenTime - simTime
+
+        if not state.isActive or timeLeft < -GREEN_DURATION then
+            state.isActive = false
+        end
+
+        -- Фазы ламп
+        local red1  = state.isActive and (timeLeft <= 2.0 and timeLeft > 0)
+        local red2  = state.isActive and (timeLeft <= 1.0 and timeLeft > 0)
+        local green = state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
+
+        -- Отрисовка 3 ламп по центру окна
+        local startPos = ui.getCursorScreenPos()
+        local lampCenterY = startPos.y + 36
+        local r1Pos = vec2(startPos.x + 70, lampCenterY)
+        local r2Pos = vec2(startPos.x + 180, lampCenterY)
+        local gPos  = vec2(startPos.x + 290, lampCenterY)
+        local radius = 24
+
+        -- Лампа 1 (Красный)
+        local colR1 = red1 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.2, 0.02, 0.02, 0.4)
+        ui.drawCircleFilled(r1Pos, radius, colR1)
+        ui.drawCircle(r1Pos, radius, rgbm(0.4, 0.4, 0.4, 0.8), 2)
+        if red1 then ui.drawCircleFilled(r1Pos, radius + 4, rgbm(1.0, 0.0, 0.0, 0.3)) end
+
+        -- Лампа 2 (Красный)
+        local colR2 = red2 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.2, 0.02, 0.02, 0.4)
+        ui.drawCircleFilled(r2Pos, radius, colR2)
+        ui.drawCircle(r2Pos, radius, rgbm(0.4, 0.4, 0.4, 0.8), 2)
+        if red2 then ui.drawCircleFilled(r2Pos, radius + 4, rgbm(1.0, 0.0, 0.0, 0.3)) end
+
+        -- Лампа 3 (Зеленый)
+        local colG = green and rgbm(0.05, 1.0, 0.25, 1.0) or rgbm(0.02, 0.2, 0.04, 0.4)
+        ui.drawCircleFilled(gPos, radius, colG)
+        ui.drawCircle(gPos, radius, rgbm(0.4, 0.4, 0.4, 0.8), 2)
+        if green then ui.drawCircleFilled(gPos, radius + 6, rgbm(0.1, 1.0, 0.2, 0.4)) end
+
+        -- Текстовый статус под лампами
+        ui.dummy(vec2(0, 68))
+        local statusStr = "ОЖИДАНИЕ СТАРТА"
+        local statusCol = rgbm(0.6, 0.6, 0.6, 1)
+
+        if green then
+            statusStr = "СТАРТ!  GO!  GO!"
+            statusCol = rgbm(0.1, 1.0, 0.3, 1)
+        elseif red2 then
+            statusStr = "ВНИМАНИЕ (1 СЕК)"
+            statusCol = rgbm(1.0, 0.6, 0.1, 1)
+        elseif red1 then
+            statusStr = "ГОТОВНОСТЬ (2 СЕК)"
+            statusCol = rgbm(1.0, 0.3, 0.2, 1)
+        elseif state.isActive then
+            statusStr = "ПРИГОТОВИТЬСЯ (3 СЕК)"
+            statusCol = rgbm(0.9, 0.9, 0.2, 1)
+        end
+
+        ui.textColored(statusStr, statusCol)
+
+        -- Панель судьи (только для Сергея)
+        if isJudge() then
+            ui.sameLine(winW - 190)
+            if ui.button("▶ СТАРТ (F8)", vec2(90, 24)) then
+                triggerStart()
+            end
+            ui.sameLine()
+            if ui.button("✖ СБРОС", vec2(70, 24)) then
                 cancelStart()
             end
-            ui.popStyleColor(2)
         end
+    end)
 
-        ui.endTransparentWindow()
-    end
-
-    -- ----------------------------------------------------------------
-    -- 3. САМ СВЕТОФОР (По центру экрана, если включен)
-    -- ----------------------------------------------------------------
-    if not state.hudEnabled then
-        ui.popStyleVar(2)
-        return
-    end
-
-    local simTime = ac.getSim().time
-    local timeLeft = state.targetGreenTime - simTime
-
-    -- Проверяем фазу активности
-    if not state.isActive or timeLeft < -GREEN_DURATION then
-        state.isActive = false
-        ui.popStyleVar(2)
-        return
-    end
-
-    -- Координаты светофора
-    local center = vec2(screenSize.x * 0.5, screenSize.y * 0.22)
-    local width = 360
-    local height = 115
-
-    ui.beginTransparentWindow("drift_tree_display", center - vec2(width * 0.5, height * 0.5), vec2(width, height))
-
-    local drawPos = ui.getCursorScreenPos() + vec2(width * 0.5, height * 0.5)
-
-    -- Фазы ламп
-    local red1  = (timeLeft <= 2.0 and timeLeft > 0)
-    local red2  = (timeLeft <= 1.0 and timeLeft > 0)
-    local green = (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
-
-    -- Фон плашки светофора (стиль ГАЗДЕРЖИМ.РФ)
-    local bgMin = drawPos - vec2(width * 0.5, height * 0.5)
-    local bgMax = drawPos + vec2(width * 0.5, height * 0.5)
-    ui.drawRectFilled(bgMin, bgMax, rgbm(0.04, 0.04, 0.05, 0.92), 14)
-    ui.drawRect(bgMin, bgMax, rgbm(0.25, 0.25, 0.3, 0.95), 14, 2)
-
-    -- Расположение 3 ламп (Красный 1, Красный 2, Зеленый)
-    local r1Pos = drawPos + vec2(-100, -8)
-    local r2Pos = drawPos + vec2(0, -8)
-    local gPos  = drawPos + vec2(100, -8)
-    local radius = 32
-
-    -- Лампа 1 (Красный)
-    local cR1 = red1 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.18, 0.02, 0.02, 0.35)
-    ui.drawCircleFilled(r1Pos, radius, cR1)
-    ui.drawCircle(r1Pos, radius, rgbm(0.3, 0.3, 0.3, 0.8), 2)
-    if red1 then
-        local glow = 4 + math.sin(state.pulse) * 2
-        ui.drawCircleFilled(r1Pos, radius + glow, rgbm(1.0, 0.0, 0.0, 0.3))
-    end
-
-    -- Лампа 2 (Красный)
-    local cR2 = red2 and rgbm(1.0, 0.05, 0.05, 1.0) or rgbm(0.18, 0.02, 0.02, 0.35)
-    ui.drawCircleFilled(r2Pos, radius, cR2)
-    ui.drawCircle(r2Pos, radius, rgbm(0.3, 0.3, 0.3, 0.8), 2)
-    if red2 then
-        local glow = 4 + math.sin(state.pulse) * 2
-        ui.drawCircleFilled(r2Pos, radius + glow, rgbm(1.0, 0.0, 0.0, 0.3))
-    end
-
-    -- Лампа 3 (Зеленый - GO!)
-    local cG = green and rgbm(0.05, 1.0, 0.25, 1.0) or rgbm(0.02, 0.18, 0.04, 0.35)
-    ui.drawCircleFilled(gPos, radius, cG)
-    ui.drawCircle(gPos, radius, rgbm(0.3, 0.3, 0.3, 0.8), 2)
-    if green then
-        local glow = 6 + math.sin(state.pulse) * 3
-        ui.drawCircleFilled(gPos, radius + glow, rgbm(0.1, 1.0, 0.2, 0.45))
-    end
-
-    -- Текстовый статус под лампами
-    local statusStr = ""
-    local textCol = rgbm(1, 1, 1, 1)
-
-    if green then
-        statusStr = "СТАРТ!  GO!  GO!"
-        textCol = rgbm(0.15, 1.0, 0.35, 1)
-    elseif red2 then
-        statusStr = "ВНИМАНИЕ..."
-        textCol = rgbm(1.0, 0.6, 0.1, 1)
-    elseif red1 then
-        statusStr = "ГОТОВНОСТЬ..."
-        textCol = rgbm(1.0, 0.3, 0.2, 1)
-    else
-        statusStr = "ОЖИДАНИЕ СТАРТА"
-        textCol = rgbm(0.7, 0.7, 0.7, 1)
-    end
-
-    local textWidth = ui.measureText(statusStr).x
-    ui.setCursorScreenPos(drawPos + vec2(-textWidth * 0.5, 34))
-    ui.textColored(statusStr, textCol)
-
-    ui.endTransparentWindow()
+    ui.popStyleColor(2)
     ui.popStyleVar(2)
 end
 
 -- ====================================================================
--- ОСНОВНОЙ ЦИКЛ CSP
+-- ЦИКЛ ОБНОВЛЕНИЯ
 -- ====================================================================
 function script.update(dt)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
-    renderTreeUI(dt)
+
+    -- Проверка горячей клавиши F8 для судьи
+    if isJudge() and ui.isKeyPressed(JUDGE_HOTKEY) then
+        triggerStart()
+    end
+
+    if not isRunningAsStandaloneApp then
+        local ok, err = pcall(renderTreeHUD)
+        if not ok and err then
+            ac.log("DriftStartTree Error: " .. tostring(err))
+        end
+    end
 end
 
-function script.drawUI()
-    -- Для версий CSP, поддерживающих прямой хук drawUI
-    renderTreeUI(0.016)
+function script.windowMain()
+    isRunningAsStandaloneApp = true
+    local ok, err = pcall(renderTreeHUD)
+    if not ok and err then
+        ac.log("DriftStartTree App Error: " .. tostring(err))
+    end
 end

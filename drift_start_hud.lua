@@ -2,7 +2,7 @@
 -- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА)
 -- Официальный трековый модуль для соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
 -- Assetto Corsa Custom Shaders Patch
--- Версия: 2.3 (Track Extension Auto-HUD)
+-- Версия: 2.4 (Track Extension Auto-HUD)
 -- ====================================================================
 
 local COUNTDOWN_TOTAL = 3.0 -- 3 секунды отсчета
@@ -27,18 +27,34 @@ local state = {
 -- Инициализация данных локального игрока
 local function initPlayer()
     local sim = ac.getSim()
-    state.myCarIndex = (sim and sim.focusedCar) or 0
+    local carIndex = 0
+    pcall(function()
+        if sim and sim.focusedCar then carIndex = sim.focusedCar end
+    end)
+    state.myCarIndex = carIndex
+
     if ac.getDriverName then
-        state.myDriverName = ac.getDriverName(state.myCarIndex) or ""
+        local okName, dName = pcall(ac.getDriverName, state.myCarIndex)
+        if okName and dName then
+            state.myDriverName = dName
+        end
     end
 end
 
 -- Проверка прав судьи
 local function isJudge()
     local sim = ac.getSim()
-    if not sim or not sim.isOnlineRace then return true end -- Одиночный заезд / практика / тренировка
-    if sim.isServerAdmin then return true end
+    if not sim then return true end
 
+    -- Одиночный режим / практика
+    local okOnline, isOnline = pcall(function() return sim.isOnlineRace end)
+    if okOnline and not isOnline then return true end
+
+    -- Администратор сервера
+    local okAdmin, isAdmin = pcall(function() return sim.isAdmin end)
+    if okAdmin and isAdmin then return true end
+
+    -- Проверка имени судьи (Sergey Primo)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
@@ -47,13 +63,15 @@ local function isJudge()
     if string.find(nameLower, "sergey") or string.find(nameLower, "primo") or string.find(nameLower, "сергей") then
         return true
     end
+
     return false
 end
 
 -- Запуск отсчета (Судья)
 local function triggerStart()
     local sim = ac.getSim()
-    local simTime = (sim and sim.time) or 0
+    local simTime = 0
+    pcall(function() if sim and sim.time then simTime = sim.time end end)
     local greenTimestamp = simTime + COUNTDOWN_TOTAL
 
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
@@ -97,7 +115,11 @@ if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
         local msg = string.lower(message)
-        local senderName = string.lower((senderCarIndex and ac.getDriverName and ac.getDriverName(senderCarIndex)) or "")
+        local senderName = ""
+        if senderCarIndex and ac.getDriverName then
+            local ok, nm = pcall(ac.getDriverName, senderCarIndex)
+            if ok and nm then senderName = string.lower(nm) end
+        end
 
         local allowed = string.find(senderName, "sergey")
             or string.find(senderName, "primo")
@@ -185,7 +207,8 @@ local function renderTreeContent()
 
     -- 2. Расчет времени отсчета
     local sim = ac.getSim()
-    local simTime = (sim and sim.time) or 0
+    local simTime = 0
+    pcall(function() if sim and sim.time then simTime = sim.time end end)
     local timeLeft = state.targetGreenTime - simTime
 
     if not state.isActive or timeLeft < -GREEN_DURATION then
@@ -366,4 +389,4 @@ function script.update(dt)
     renderFloatingHUD()
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v2.3")
+ac.log("[DriftStartTree] Track Extension HUD loaded v2.4")

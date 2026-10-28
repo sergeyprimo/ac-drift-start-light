@@ -2,7 +2,7 @@
 -- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА ДРИФТА)
 -- Профессиональный модуль соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
 -- Assetto Corsa Custom Shaders Patch
--- Версия: 3.1 (Drift Edition: Управление доступом судей и пилотов)
+-- Версия: 3.5 (Multiplayer Synchronized Chat-RPC & OnlineEvent Edition)
 -- ====================================================================
 
 local GREEN_DURATION  = 2.5 -- Секунды горения зелёного света
@@ -103,8 +103,12 @@ end
 
 -- Проверка: является ли имя именем Главного Администратора (Sergey Primo)
 local function isMasterAdminName(name)
-    local n = string.lower(name or "")
-    return string.find(n, "sergey") ~= nil or string.find(n, "primo") ~= nil or string.find(n, "сергей") ~= nil
+    if not name or name == "" then return false end
+    local n = string.lower(tostring(name))
+    return string.find(n, "sergey", 1, true) ~= nil 
+        or string.find(n, "primo", 1, true) ~= nil 
+        or string.find(n, "сергей", 1, true) ~= nil 
+        or string.find(n, "газдержим", 1, true) ~= nil
 end
 
 -- Проверка прав Главного Администратора
@@ -131,7 +135,7 @@ end
 local function isPilotAllowed(name)
     if not name or name == "" then return false end
     if isMasterAdminName(name) then return true end
-    local n = string.lower(name)
+    local n = string.lower(string.trim and string.trim(tostring(name)) or tostring(name))
     return allowedJudges[n] == true
 end
 
@@ -160,20 +164,6 @@ local function broadcastPermissions()
     end)
 
     ac.log("[DriftStartTree] Permissions updated (" .. tostring(#list) .. " judges allowed)")
-end
-
--- Назначить пилота судьей
-local function grantJudge(name)
-    if not name or name == "" then return end
-    allowedJudges[string.lower(name)] = true
-    broadcastPermissions()
-end
-
--- Отозвать права судьи у пилота
-local function revokeJudge(name)
-    if not name or name == "" then return end
-    allowedJudges[string.lower(name)] = nil
-    broadcastPermissions()
 end
 
 -- Шаг таймера отсчета
@@ -208,9 +198,163 @@ local function advanceTimer(dt)
     end
 end
 
+-- ====================================================================
+-- СЕТЕВАЯ СИНХРОНИЗАЦИЯ (CSP ONLINE EVENT + CHAT RPC + LOCAL SHARED IPC)
+-- ====================================================================
+
+local lastNetSendTime = 0
+
+-- Единый обработчик входящих сетевых команд от судьи
+local function applyRemoteAction(actionCode, interval, author, target, senderIndex)
+    local authorName = (author and author ~= "") and tostring(author) or ""
+    if authorName == "" and senderIndex and senderIndex >= 0 and ac.getDriverName then
+        local ok, nm = pcall(ac.getDriverName, senderIndex)
+        if ok and nm then authorName = nm end
+    end
+
+    -- Проверка авторизации: Главный админ (Sergey Primo) или пилот из списка судей
+    local isAuth = isMasterAdminName(authorName) or isPilotAllowed(authorName)
+    if not isAuth and senderIndex and senderIndex == state.myCarIndex and isJudge() then
+        isAuth = true
+    end
+    if not isAuth and senderIndex and senderIndex >= 0 and ac.getDriverName then
+        local ok, nm = pcall(ac.getDriverName, senderIndex)
+        if ok and nm and (isMasterAdminName(nm) or isPilotAllowed(nm)) then
+            isAuth = true
+            authorName = nm
+        end
+    end
+
+    if not isAuth then
+        ac.log("[DriftStartTree] Ignored unauthorized network command from: " .. tostring(authorName))
+        return
+    end
+
+    if actionCode == 1 or actionCode == "START" then
+        local iv = tonumber(interval) or 1.0
+        iv = math.clamp(iv, 0.3, 3.0)
+        local totalCd = iv * 3.0
+
+        -- Защита от сброса таймера при получении дублирующего эха/события в пределах 0.35 сек
+        if state.isActive and (totalCd - state.timeLeft) < 0.35 then
+            return
+        end
+
+        serverDisabled = false
+        state.stageInterval = iv
+        state.totalDuration = totalCd
+        state.timeLeft = totalCd
+        state.isActive = true
+        lastTimerClock = os.clock()
+        ac.log(string.format("[DriftStartTree] NET: START received from %s (step: %.2fs)", tostring(authorName), iv))
+    elseif actionCode == 2 or actionCode == "CANCEL" then
+        state.timeLeft = 0
+        state.isActive = false
+        ac.log("[DriftStartTree] NET: CANCEL received from " .. tostring(authorName))
+    elseif actionCode == 3 or actionCode == "DISABLE" then
+        serverDisabled = true
+        state.isActive = false
+        state.timeLeft = 0
+        ac.log("[DriftStartTree] NET: SERVER DISABLED by " .. tostring(authorName))
+    elseif actionCode == 4 or actionCode == "ENABLE" then
+        serverDisabled = false
+        state.isActive = false
+        state.timeLeft = 0
+        ac.log("[DriftStartTree] NET: SERVER ENABLED by " .. tostring(authorName))
+    elseif actionCode == 5 or actionCode == "GRANT" then
+        if target and target ~= "" then
+            allowedJudges[string.lower(tostring(target))] = true
+            ac.log("[DriftStartTree] NET: JUDGE GRANTED to " .. tostring(target))
+        end
+    elseif actionCode == 6 or actionCode == "REVOKE" then
+        if target and target ~= "" then
+            allowedJudges[string.lower(tostring(target))] = nil
+            ac.log("[DriftStartTree] NET: JUDGE REVOKED from " .. tostring(target))
+        end
+    end
+end
+
+-- Регистрация CSP OnlineEvent (нативный бинарный сетевой протокол CSP)
+local onlineStartEvent = nil
+if ac.OnlineEvent and ac.StructItem then
+    pcall(function()
+        onlineStartEvent = ac.OnlineEvent({
+            key = ac.StructItem.key('DriftTreeSyncV5'),
+            action = ac.StructItem.byte(),
+            interval = ac.StructItem.float(),
+            author = ac.StructItem.string(32),
+            target = ac.StructItem.string(32),
+        }, function(sender, data)
+            if not data then return end
+            pcall(applyRemoteAction, data.action, data.interval, data.author, data.target, sender and sender.index)
+        end)
+    end)
+end
+
+-- Отправка сетевого пакета через OnlineEvent и скрытый Chat RPC
+local function sendNetworkSync(actionCode, interval, targetName)
+    local now = os.clock()
+    if (now - lastNetSendTime) < 0.15 and actionCode == 1 then
+        return
+    end
+    lastNetSendTime = now
+
+    local myName = (state.myDriverName and state.myDriverName ~= "") and state.myDriverName or "Sergey Primo"
+    local iv = tonumber(interval) or 1.0
+    local tgt = targetName or ""
+
+    -- 1. CSP OnlineEvent
+    if onlineStartEvent then
+        pcall(onlineStartEvent, {
+            action = actionCode,
+            interval = iv,
+            author = myName,
+            target = tgt
+        }, (actionCode == 5 or actionCode == 6))
+    end
+
+    -- 2. AC Chat RPC (скрытое служебное сообщение через сервер)
+    if ac.sendChatMessage then
+        local cmd = nil
+        if actionCode == 1 then
+            cmd = string.format("!DRIFT_START:%.2f:%s", iv, myName)
+        elseif actionCode == 2 then
+            cmd = "!DRIFT_CANCEL:0:" .. myName
+        elseif actionCode == 3 then
+            cmd = "!DRIFT_DISABLE:0:" .. myName
+        elseif actionCode == 4 then
+            cmd = "!DRIFT_ENABLE:0:" .. myName
+        elseif actionCode == 5 then
+            cmd = string.format("!DRIFT_GRANT:%s:%s", tgt, myName)
+        elseif actionCode == 6 then
+            cmd = string.format("!DRIFT_REVOKE:%s:%s", tgt, myName)
+        end
+        if cmd then
+            pcall(ac.sendChatMessage, cmd)
+        end
+    end
+end
+
+-- Назначить пилота судьей
+local function grantJudge(name)
+    if not name or name == "" then return end
+    local clean = string.lower(string.trim and string.trim(name) or name)
+    allowedJudges[clean] = true
+    broadcastPermissions()
+    sendNetworkSync(5, 0, clean)
+end
+
+-- Отозвать права судьи у пилота
+local function revokeJudge(name)
+    if not name or name == "" then return end
+    local clean = string.lower(string.trim and string.trim(name) or name)
+    allowedJudges[clean] = nil
+    broadcastPermissions()
+    sendNetworkSync(6, 0, clean)
+end
+
 -- Запуск отсчета (Судья)
 local function triggerStart()
-    -- Запуск старта судьёй гарантированно активирует светофор
     serverDisabled = false
 
     local interval = tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
@@ -223,12 +367,13 @@ local function triggerStart()
     state.isActive = true
     lastTimerClock = os.clock()
 
-    -- Формируем список судей для попутной синхронизации
+    -- Формируем список судей для локальной синхронизации
     local jList = {}
     for name, isAllowed in pairs(allowedJudges) do
         if isAllowed then table.insert(jList, name) end
     end
 
+    -- 1. Локальный broadcast (между App и Track HUD на ПК судьи)
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
         action = "start",
         duration = totalCountdown,
@@ -236,6 +381,9 @@ local function triggerStart()
         judges = jList,
         serverDisabled = false
     })
+
+    -- 2. Сетевая рассылка всем пилотам на сервере (OnlineEvent + Chat RPC)
+    sendNetworkSync(1, interval, "")
 
     ac.log(string.format("[DriftStartTree] Countdown STARTED! Total: %.2fs (interval: %.2fs)", totalCountdown, interval))
 end
@@ -249,6 +397,8 @@ local function cancelStart()
         action = "cancel",
         serverDisabled = serverDisabled
     })
+
+    sendNetworkSync(2, 0, "")
 
     ac.log("[DriftStartTree] Countdown CANCELLED")
 end
@@ -265,10 +415,11 @@ local function toggleServerDisabled()
         action = serverDisabled and "server_disable" or "server_enable",
         serverDisabled = serverDisabled
     })
+    sendNetworkSync(serverDisabled and 3 or 4, 0, "")
     ac.log("[DriftStartTree] Broadcasted server " .. (serverDisabled and "DISABLE" or "ENABLE"))
 end
 
--- Прием сетевого события от сервера / судьи (0 ms задержка)
+-- Прием локального сетевого события от сервера / судьи (0 ms задержка)
 ac.onSharedEvent("DRIFT_START_SYNC", function(data)
     if not data then return end
 
@@ -318,10 +469,35 @@ ac.onSharedEvent("DRIFT_START_JUDGE_PERMS", function(data)
     ac.log("[DriftStartTree] SYNC: updated judge permissions (" .. tostring(#data.judges) .. " judges)")
 end)
 
--- Прием чат-команд (!start, !stop, !cancel, !go, !judge <ник>, !unjudge <ник>)
+-- Прием скрытых сетевых RPC и чат-команд
 if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
+
+        -- Служебный сетевой RPC протокол светофора (!DRIFT_...)
+        if string.find(message, "^!DRIFT_") then
+            local act, p1, p2 = string.match(message, "^!DRIFT_([%w_]+):?([^:]*):?(.*)")
+            act = act and string.upper(act) or ""
+            p1 = p1 or ""
+            p2 = p2 or ""
+
+            if act == "START" then
+                applyRemoteAction("START", tonumber(p1) or 1.0, (p2 ~= "") and p2 or "Sergey Primo", "", senderCarIndex)
+            elseif act == "CANCEL" then
+                applyRemoteAction("CANCEL", 0, (p2 ~= "") and p2 or p1, "", senderCarIndex)
+            elseif act == "DISABLE" then
+                applyRemoteAction("DISABLE", 0, (p2 ~= "") and p2 or p1, "", senderCarIndex)
+            elseif act == "ENABLE" then
+                applyRemoteAction("ENABLE", 0, (p2 ~= "") and p2 or p1, "", senderCarIndex)
+            elseif act == "GRANT" then
+                applyRemoteAction("GRANT", 0, (p2 ~= "") and p2 or "Sergey Primo", p1, senderCarIndex)
+            elseif act == "REVOKE" then
+                applyRemoteAction("REVOKE", 0, (p2 ~= "") and p2 or "Sergey Primo", p1, senderCarIndex)
+            end
+            -- Возврат true полностью скрывает служебное RPC сообщение из чата для всех игроков!
+            return true
+        end
+
         local msg = string.lower(message)
 
         -- Команда переключения HUD для любого игрока
@@ -446,7 +622,7 @@ local function renderTreeContent(dt)
     local isHudOn = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
 
     -- 1. Если светофор полностью выключен (отключен на экране)
-    if not isHudOn then
+    if not isHudOn and not state.isActive then
         ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.85, 0.35, 0.35, 1.0))
         ui.text("⚡ СВЕТОФОР (ОТКЛЮЧЕН)")
         ui.popStyleColor()
@@ -477,7 +653,7 @@ local function renderTreeContent(dt)
     local red2    = not serverDisabled and state.isActive and (timeLeft <= interval and timeLeft > 0)
     local green   = not serverDisabled and state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
 
-    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
+    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1") and not state.isActive
 
     -- ============================================================
     -- КОМПАКТНЫЙ СВЁРНУТЫЙ РЕЖИМ (МИНИ-ПАНЕЛЬ)
@@ -906,7 +1082,7 @@ function script.windowMain(dt)
     ac.storage["drift_tree_app_active"] = tostring(os.clock())
 
     local isEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
-    if not isEnabled then
+    if not isEnabled and not state.isActive then
         if ui.setNextWindowSize then
             ui.setNextWindowSize(vec2(270, 72))
         end
@@ -922,7 +1098,7 @@ function script.windowMain(dt)
         return
     end
 
-    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
+    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1") and not state.isActive
     local cardW = isMinimized and (isJudge() and not previewPilotMode and 410 or 300) or 390
     local cardH = isMinimized and 56 or ((isJudge() and not previewPilotMode) and (showPermsPanel and 535 or 345) or 175)
 

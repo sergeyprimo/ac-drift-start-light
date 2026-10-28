@@ -796,10 +796,6 @@ local function renderFloatingHUD(dt)
     local cardW = isMinimized and (isJudge() and not previewPilotMode and 380 or 300) or 390
     local cardH = isMinimized and 56 or ((isJudge() and not previewPilotMode) and (showPermsPanel and 500 or 310) or 175)
 
-    if ui.setNextWindowSize then
-        ui.setNextWindowSize(vec2(cardW, cardH))
-    end
-
     local defX = 765
     pcall(function()
         local uiState = ac.getUI()
@@ -811,27 +807,30 @@ local function renderFloatingHUD(dt)
     local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or defX
     local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or 40
 
-    local winTitle = "🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_HUD"
+    local winTitle = "DRIFT_START_HUD"
+    local winFlags = bit.bor(
+        ui.WindowFlags.NoTitleBar,
+        ui.WindowFlags.NoScrollbar,
+        ui.WindowFlags.NoCollapse,
+        ui.WindowFlags.NoNav,
+        ui.WindowFlags.NoFocusOnAppearing,
+        ui.WindowFlags.NoBringToFrontOnFocus
+    )
 
-    -- 1. Родной метод для плавающих панелей CSP (ui.toolWindow)
-    if ui.toolWindow then
-        ui.toolWindow(winTitle, vec2(savedX, savedY), vec2(cardW, cardH), false, true, function()
-            local curPos = ui.windowPos()
-            if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
-                ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
-                ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
-                savedX = curPos.x
-                savedY = curPos.y
-            end
+    if not posInitialized then
+        if ui.setNextWindowPosition then
+            ui.setNextWindowPosition(vec2(savedX, savedY))
+        end
+        posInitialized = true
+    end
 
-            local ok, err = pcall(renderTreeContent, dt)
-            if not ok and err then
-                ui.text("Ошибка: " .. tostring(err))
-            end
-        end)
-    -- 2. Резервный метод ui.beginTransparentWindow
-    elseif ui.beginTransparentWindow then
-        ui.beginTransparentWindow(winTitle, vec2(savedX, savedY), vec2(cardW, cardH), false, true)
+    if ui.setNextWindowSize then
+        ui.setNextWindowSize(vec2(cardW, cardH))
+    end
+
+    -- Неблокирующее прозрачное HUD окно с поддержкой кликов мыши без перехвата управления машиной
+    if ui.beginTransparentWindow then
+        ui.beginTransparentWindow(winTitle, vec2(savedX, savedY), vec2(cardW, cardH), false, winFlags)
         local curPos = ui.windowPos()
         if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
             ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
@@ -844,9 +843,7 @@ local function renderFloatingHUD(dt)
             ui.text("Ошибка: " .. tostring(err))
         end
         ui.endTransparentWindow()
-    -- 3. Резервный стандартный ImGui begin
     elseif ui.begin then
-        local winFlags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
         ui.begin(winTitle, winFlags, function()
             local curPos = ui.windowPos()
             if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
@@ -893,17 +890,7 @@ function script.drawUI()
     drawHUDPass(0.016)
 end
 
--- 2. Резервный хук Exclusive HUD (для скриптов, загруженных динамически)
-if ui.onExclusiveHUD then
-    pcall(function()
-        ui.onExclusiveHUD(function(mode)
-            drawHUDPass(0.016)
-            return 'apps-nonexclusive'
-        end)
-    end)
-end
-
--- 3. Добавление светофора в боковое меню приложений AC (Apps Sidebar)
+-- 2. Добавление светофора в боковое меню приложений AC (Apps Sidebar)
 if ui.addSettings then
     pcall(function()
         ui.addSettings({
@@ -920,7 +907,7 @@ if ui.addSettings then
     end)
 end
 
--- 4. Регистрация инструмента в верхней панели CSP (Online Extra)
+-- 3. Регистрация инструмента в верхней панели CSP (Online Extra)
 if ui.registerOnlineExtra then
     pcall(function()
         ui.registerOnlineExtra(
@@ -940,7 +927,7 @@ if ui.registerOnlineExtra then
     end)
 end
 
--- 5. Симуляционный цикл (БЕЗ UI ВЫЗОВОВ ВО ИЗБЕЖАНИЕ КРАША КРАСНОГО ТЕКСТА)
+-- 4. Симуляционный цикл (БЕЗ UI ВЫЗОВОВ ВО ИЗБЕЖАНИЕ КРАША КРАСНОГО ТЕКСТА)
 function script.update(dt)
     frameCount = frameCount + 1
 
@@ -955,4 +942,4 @@ function script.update(dt)
     end
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v3.2 (Bulletproof Online Edition)")
+ac.log("[DriftStartTree] Track Extension HUD loaded v3.3 (Non-Blocking Controls Edition)")

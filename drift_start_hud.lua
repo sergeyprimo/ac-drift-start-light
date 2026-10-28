@@ -2,22 +2,25 @@
 -- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА ДРИФТА)
 -- Профессиональный трековый модуль соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
 -- Assetto Corsa Custom Shaders Patch
--- Версия: 3.0 (Drift Edition: Настраиваемый интервал + Реалистичные 3D-линзы)
+-- Версия: 3.1 (Drift Edition: Управление доступом судей и пилотов)
 -- ====================================================================
 
 local GREEN_DURATION  = 2.5 -- Секунды горения зелёного света
 
-local STORAGE_KEY_POS_X    = "drift_tree_pos_x"
-local STORAGE_KEY_POS_Y    = "drift_tree_pos_y"
-local STORAGE_KEY_ENABLED  = "drift_tree_enabled"
-local STORAGE_KEY_HOTKEY   = "drift_tree_hotkey"
-local STORAGE_KEY_INTERVAL = "drift_tree_interval"
+local STORAGE_KEY_POS_X          = "drift_tree_pos_x"
+local STORAGE_KEY_POS_Y          = "drift_tree_pos_y"
+local STORAGE_KEY_ENABLED        = "drift_tree_enabled"
+local STORAGE_KEY_HOTKEY         = "drift_tree_hotkey"
+local STORAGE_KEY_INTERVAL       = "drift_tree_interval"
+local STORAGE_KEY_ALLOWED_JUDGES = "drift_tree_allowed_judges"
 
 local frameCount = 0
 local lastUpdateFrame = -1
 local posInitialized = false
 local prevHotkeyDown = false
 local previewPilotMode = false
+local showPermsPanel = false
+local manualPilotInput = ""
 
 -- Доступные горячие клавиши для назначения
 local HOTKEY_LIST = {
@@ -42,6 +45,23 @@ local PRESETS = {
     { label = "1.0с (STD)",  val = 1.00 },
     { label = "1.5с",        val = 1.50 },
 }
+
+local allowedJudges = {}
+
+-- Загрузка сохранённого списка назначенных судей
+pcall(function()
+    local savedStr = ac.storage[STORAGE_KEY_ALLOWED_JUDGES]
+    if savedStr and savedStr ~= "" then
+        local parsed = JSON.parse(savedStr)
+        if type(parsed) == "table" then
+            for _, name in ipairs(parsed) do
+                if type(name) == "string" and name ~= "" then
+                    allowedJudges[string.lower(name)] = true
+                end
+            end
+        end
+    end
+end)
 
 local state = {
     timeLeft = 0,
@@ -79,12 +99,18 @@ local function initPlayer()
     end
 end
 
--- Проверка прав судьи
-local function isJudge()
+-- Проверка: является ли имя именем Главного Администратора (Sergey Primo)
+local function isMasterAdminName(name)
+    local n = string.lower(name or "")
+    return string.find(n, "sergey") ~= nil or string.find(n, "primo") ~= nil or string.find(n, "сергей") ~= nil
+end
+
+-- Проверка прав Главного Администратора
+local function isMasterAdmin()
     local sim = ac.getSim()
     if not sim then return true end
 
-    -- Одиночный режим / практика
+    -- Одиночный режим / тренировка — полный доступ
     local okOnline, isOnline = pcall(function() return sim.isOnlineRace end)
     if okOnline and not isOnline then return true end
 
@@ -92,17 +118,60 @@ local function isJudge()
     local okAdmin, isAdmin = pcall(function() return sim.isAdmin end)
     if okAdmin and isAdmin then return true end
 
-    -- Проверка имени судьи (Sergey Primo)
     if not state.myDriverName or state.myDriverName == "" then
         initPlayer()
     end
 
-    local nameLower = string.lower(state.myDriverName or "")
-    if string.find(nameLower, "sergey") or string.find(nameLower, "primo") or string.find(nameLower, "сергей") then
-        return true
+    return isMasterAdminName(state.myDriverName)
+end
+
+-- Проверка: разрешено ли пилоту судейство
+local function isPilotAllowed(name)
+    if not name or name == "" then return false end
+    if isMasterAdminName(name) then return true end
+    local n = string.lower(name)
+    return allowedJudges[n] == true
+end
+
+-- Общая проверка прав судьи (Главный админ ИЛИ назначенный пилот)
+local function isJudge()
+    if isMasterAdmin() then return true end
+    if not state.myDriverName or state.myDriverName == "" then
+        initPlayer()
+    end
+    return isPilotAllowed(state.myDriverName)
+end
+
+-- Рассылка списка прав судей по сети
+local function broadcastPermissions()
+    local list = {}
+    for name, isAllowed in pairs(allowedJudges) do
+        if isAllowed then table.insert(list, name) end
     end
 
-    return false
+    ac.broadcastSharedEvent("DRIFT_START_JUDGE_PERMS", {
+        judges = list
+    })
+
+    pcall(function()
+        ac.storage[STORAGE_KEY_ALLOWED_JUDGES] = JSON.stringify(list)
+    end)
+
+    ac.log("[DriftStartTree] Permissions updated (" .. tostring(#list) .. " judges allowed)")
+end
+
+-- Назначить пилота судьей
+local function grantJudge(name)
+    if not name or name == "" then return end
+    allowedJudges[string.lower(name)] = true
+    broadcastPermissions()
+end
+
+-- Отозвать права судьи у пилота
+local function revokeJudge(name)
+    if not name or name == "" then return end
+    allowedJudges[string.lower(name)] = nil
+    broadcastPermissions()
 end
 
 -- Шаг таймера отсчета
@@ -133,10 +202,16 @@ local function triggerStart()
     state.timeLeft = totalCountdown
     state.isActive = true
 
+    local jList = {}
+    for name, isAllowed in pairs(allowedJudges) do
+        if isAllowed then table.insert(jList, name) end
+    end
+
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
         action = "start",
         duration = totalCountdown,
-        interval = interval
+        interval = interval,
+        judges = jList
     })
 
     ac.log(string.format("[DriftStartTree] Countdown STARTED! Total: %.2fs (interval: %.2fs)", totalCountdown, interval))
@@ -157,6 +232,13 @@ end
 -- Прием сетевого события от сервера / судьи (0 ms задержка)
 ac.onSharedEvent("DRIFT_START_SYNC", function(data)
     if not data then return end
+
+    if data.judges and type(data.judges) == "table" then
+        for _, name in ipairs(data.judges) do
+            allowedJudges[string.lower(name)] = true
+        end
+    end
+
     if data.action == "cancel" or (data.duration and tonumber(data.duration) <= 0) then
         state.isActive = false
         state.timeLeft = 0
@@ -170,7 +252,17 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
     end
 end)
 
--- Прием чат-команд судьи (!start [интервал], !stop, !cancel, !go)
+-- Прием события обновления судейских прав
+ac.onSharedEvent("DRIFT_START_JUDGE_PERMS", function(data)
+    if not data or not data.judges then return end
+    allowedJudges = {}
+    for _, name in ipairs(data.judges) do
+        allowedJudges[string.lower(name)] = true
+    end
+    ac.log("[DriftStartTree] SYNC: updated judge permissions (" .. tostring(#data.judges) .. " judges)")
+end)
+
+-- Прием чат-команд (!start, !stop, !cancel, !go, !judge <ник>, !unjudge <ник>)
 if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
@@ -181,12 +273,23 @@ if ac.onChatMessage then
             if ok and nm then senderName = string.lower(nm) end
         end
 
-        local allowed = string.find(senderName, "sergey")
-            or string.find(senderName, "primo")
-            or string.find(senderName, "сергей")
-            or isJudge()
+        local isMaster = isMasterAdminName(senderName) or (senderCarIndex == state.myCarIndex and isMasterAdmin())
+        local isAllowed = isMaster or isPilotAllowed(senderName)
 
-        if allowed then
+        if isMaster then
+            local grantTarget = string.match(msg, "!judge%s+(.+)") or string.match(msg, "!судья%s+(.+)")
+            if grantTarget then
+                grantJudge(grantTarget)
+                return false
+            end
+            local revokeTarget = string.match(msg, "!unjudge%s+(.+)") or string.match(msg, "!снять%s+(.+)")
+            if revokeTarget then
+                revokeJudge(revokeTarget)
+                return false
+            end
+        end
+
+        if isAllowed then
             if string.find(msg, "!start") or string.find(msg, "!старт") or string.find(msg, "!go") then
                 local customInterval = tonumber(string.match(msg, "!start%s+([%d%.]+)") or string.match(msg, "!старт%s+([%d%.]+)"))
                 if customInterval and customInterval >= 0.3 and customInterval <= 3.0 then
@@ -314,7 +417,7 @@ local function renderTreeContent(dt)
     -- 3. Карбоновый корпус светофора с металлическими винтами
     local cur = ui.getCursor()
     local availW = math.max(ui.availableSpaceX(), 280)
-    local boxW = math.min(availW - 6, 340)
+    local boxW = math.min(availW - 6, 350)
     local boxH = 74
     local boxX = cur.x + (availW - boxW) * 0.5
     local boxY = cur.y + 2
@@ -455,7 +558,7 @@ local function renderTreeContent(dt)
             ac.storage[STORAGE_KEY_INTERVAL] = string.format("%.2f", newInt)
         end
 
-        -- Строка горячей клавиши и переключения вида
+        -- Строка горячей клавиши и сервисных кнопок
         ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.70, 0.76, 0.85, 1.0))
         ui.text("Клавиша:")
         ui.popStyleColor()
@@ -466,7 +569,7 @@ local function renderTreeContent(dt)
             if item.id == hotkey.id then curIndex = idx; break end
         end
 
-        ui.setNextItemWidth(130)
+        ui.setNextItemWidth(110)
         if ui.combo("##hotkeySelect", HOTKEY_LIST[curIndex].short, ui.ComboFlags.HeightRegular, function()
             for idx, item in ipairs(HOTKEY_LIST) do
                 if ui.selectable(item.name, idx == curIndex) then
@@ -477,8 +580,96 @@ local function renderTreeContent(dt)
         end
 
         ui.sameLine()
-        if ui.button("👁 Вид пилота##previewPilot", vec2(95, 20)) then
+        if ui.button("👁 Вид пилота##previewPilot", vec2(90, 20)) then
             previewPilotMode = true
+        end
+
+        -- Кнопка «Доступ пилотов» (только для Главного Админа)
+        if isMasterAdmin() then
+            ui.sameLine()
+            local btnText = showPermsPanel and "👥 Доступ ▲" or "👥 Доступ ▼"
+            if showPermsPanel then
+                ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.20, 0.55, 0.85, 0.95))
+            end
+            if ui.button(btnText .. "##togglePermsBtn", vec2(85, 20)) then
+                showPermsPanel = not showPermsPanel
+            end
+            if showPermsPanel then
+                ui.popStyleColor()
+            end
+        end
+
+        -- ============================================================
+        -- ПАНЕЛЬ УПРАВЛЕНИЯ ПРАВАМИ СУДЕЙ (ТОЛЬКО ДЛЯ ГЛАВНОГО АДМИНА)
+        -- ============================================================
+        if isMasterAdmin() and showPermsPanel then
+            ui.separator()
+            ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.25, 0.85, 1.0, 1.0))
+            ui.text("👥 УПРАВЛЕНИЕ СУДЕЙСКИМИ ПРАВАМИ:")
+            ui.popStyleColor()
+
+            local sim = ac.getSim()
+            local carCount = 0
+            pcall(function() if sim and sim.carsCount then carCount = sim.carsCount end end)
+
+            local foundPilots = {}
+            for i = 0, carCount - 1 do
+                local car = ac.getCar(i)
+                if car and car.isConnected then
+                    local dName = ac.getDriverName(i) or ("Машина #" .. i)
+                    table.insert(foundPilots, { index = i, name = dName })
+                end
+            end
+
+            if #foundPilots == 0 then
+                ui.text("• Нет подключенных пилотов на сервере")
+            else
+                for _, p in ipairs(foundPilots) do
+                    local pName = p.name
+                    local isMaster = isMasterAdminName(pName)
+                    local isDelegated = isPilotAllowed(pName)
+
+                    if isMaster then
+                        ui.pushStyleColor(ui.StyleColor.Text, rgbm(1.0, 0.85, 0.25, 1.0))
+                        ui.text(string.format("★ %s (Владелец)", pName))
+                        ui.popStyleColor()
+                    else
+                        local statusCol = isDelegated and rgbm(0.2, 1.0, 0.4, 1.0) or rgbm(0.70, 0.72, 0.78, 1.0)
+                        local statusTag = isDelegated and "[СУДЬЯ]" or "[ПИЛОТ]"
+
+                        ui.pushStyleColor(ui.StyleColor.Text, statusCol)
+                        ui.text(string.format("%s %s", statusTag, pName))
+                        ui.popStyleColor()
+
+                        ui.sameLine(ui.availableSpaceX() - 86)
+                        if isDelegated then
+                            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.65, 0.15, 0.15, 0.90))
+                            if ui.button("Забрать##rev" .. p.index, vec2(80, 20)) then
+                                revokeJudge(pName)
+                            end
+                            ui.popStyleColor()
+                        else
+                            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.12, 0.55, 0.22, 0.90))
+                            if ui.button("+ Судья##gnt" .. p.index, vec2(80, 20)) then
+                                grantJudge(pName)
+                            end
+                            ui.popStyleColor()
+                        end
+                    end
+                end
+            end
+
+            -- Ручной ввод ника пилота
+            ui.dummy(vec2(0, 2))
+            ui.setNextItemWidth(170)
+            manualPilotInput = ui.inputText("Ник пилота##manInput", manualPilotInput or "", ui.InputTextFlags.Placeholder)
+            ui.sameLine()
+            if ui.button("+ Назначить##manAdd", vec2(86, 20)) then
+                if manualPilotInput and string.len(manualPilotInput) > 1 then
+                    grantJudge(manualPilotInput)
+                    manualPilotInput = ""
+                end
+            end
         end
     elseif previewPilotMode then
         ui.separator()
@@ -507,8 +698,8 @@ local function renderFloatingHUD(dt)
     local isEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
     local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or 760
     local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or 40
-    local cardW = 380
-    local cardH = isEnabled and ((isJudge() and not previewPilotMode) and 290 or 175) or 60
+    local cardW = 400
+    local cardH = isEnabled and ((isJudge() and not previewPilotMode) and (showPermsPanel and 480 or 310) or 175) or 60
 
     if not posInitialized then
         if ui.setNextWindowPosition then
@@ -570,4 +761,4 @@ function script.update(dt)
     renderFloatingHUD(dt)
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v3.0 (Drift Edition)")
+ac.log("[DriftStartTree] Track Extension HUD loaded v3.1 (Permissions Edition)")

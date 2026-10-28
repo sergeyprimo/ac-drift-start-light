@@ -1,17 +1,17 @@
 -- ====================================================================
--- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА)
--- Официальный трековый модуль для соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
+-- DRIFT START TREE HUD (СИНХРОНИЗИРОВАННЫЙ СВЕТОФОР СТАРТА ДРИФТА)
+-- Профессиональный трековый модуль соревнований ГАЗДЕРЖИМ.РФ (twitch.tv/sergeyprimo)
 -- Assetto Corsa Custom Shaders Patch
--- Версия: 2.5 (Track Extension Auto-HUD)
+-- Версия: 3.0 (Drift Edition: Настраиваемый интервал + Реалистичные 3D-линзы)
 -- ====================================================================
 
-local COUNTDOWN_TOTAL = 3.0 -- 3 секунды отсчета
-local GREEN_DURATION  = 2.5 -- 2.5 секунды горит зеленый
+local GREEN_DURATION  = 2.5 -- Секунды горения зелёного света
 
-local STORAGE_KEY_POS_X   = "drift_tree_pos_x"
-local STORAGE_KEY_POS_Y   = "drift_tree_pos_y"
-local STORAGE_KEY_ENABLED = "drift_tree_enabled"
-local STORAGE_KEY_HOTKEY  = "drift_tree_hotkey"
+local STORAGE_KEY_POS_X    = "drift_tree_pos_x"
+local STORAGE_KEY_POS_Y    = "drift_tree_pos_y"
+local STORAGE_KEY_ENABLED  = "drift_tree_enabled"
+local STORAGE_KEY_HOTKEY   = "drift_tree_hotkey"
+local STORAGE_KEY_INTERVAL = "drift_tree_interval"
 
 local frameCount = 0
 local lastUpdateFrame = -1
@@ -35,8 +35,18 @@ local HOTKEY_LIST = {
     { id = "KEY_H",     name = "Клавиша H",          short = "H",     vk = 72,  uiKey = nil },
 }
 
+-- Быстрые пресеты задержки
+local PRESETS = {
+    { label = "0.5с (PRO)",  val = 0.50 },
+    { label = "0.75с (RDS)", val = 0.75 },
+    { label = "1.0с (STD)",  val = 1.00 },
+    { label = "1.5с",        val = 1.50 },
+}
+
 local state = {
     timeLeft = 0,
+    totalDuration = 3.0,
+    stageInterval = 1.0,
     isActive = false,
     myCarIndex = 0,
     myDriverName = "",
@@ -101,6 +111,8 @@ local function advanceTimer(dt)
     lastUpdateFrame = frameCount
 
     local step = math.clamp(dt or 0.016, 0.001, 0.1)
+    state.pulse = state.pulse + step
+
     if state.isActive then
         state.timeLeft = state.timeLeft - step
         if state.timeLeft < -GREEN_DURATION then
@@ -112,15 +124,22 @@ end
 
 -- Запуск отсчета (Судья)
 local function triggerStart()
-    state.timeLeft = COUNTDOWN_TOTAL
+    local interval = tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
+    interval = math.clamp(interval, 0.3, 3.0)
+    local totalCountdown = interval * 3.0
+
+    state.stageInterval = interval
+    state.totalDuration = totalCountdown
+    state.timeLeft = totalCountdown
     state.isActive = true
 
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
         action = "start",
-        duration = COUNTDOWN_TOTAL
+        duration = totalCountdown,
+        interval = interval
     })
 
-    ac.log("[DriftStartTree] Countdown STARTED! Duration: 3.0s")
+    ac.log(string.format("[DriftStartTree] Countdown STARTED! Total: %.2fs (interval: %.2fs)", totalCountdown, interval))
 end
 
 -- Сброс отсчета (Судья)
@@ -143,13 +162,15 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
         state.timeLeft = 0
         ac.log("[DriftStartTree] Received SYNC: STOP")
     elseif data.action == "start" or (data.duration and tonumber(data.duration) > 0) then
-        state.timeLeft = tonumber(data.duration) or COUNTDOWN_TOTAL
+        state.stageInterval = tonumber(data.interval) or 1.0
+        state.totalDuration = tonumber(data.duration) or (state.stageInterval * 3.0)
+        state.timeLeft = state.totalDuration
         state.isActive = true
-        ac.log("[DriftStartTree] Received SYNC: START (" .. tostring(state.timeLeft) .. "s)")
+        ac.log(string.format("[DriftStartTree] Received SYNC: START (total: %.2fs, step: %.2fs)", state.totalDuration, state.stageInterval))
     end
 end)
 
--- Прием чат-команд судьи (!start, !stop, !cancel, !go)
+-- Прием чат-команд судьи (!start [интервал], !stop, !cancel, !go)
 if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
@@ -167,6 +188,10 @@ if ac.onChatMessage then
 
         if allowed then
             if string.find(msg, "!start") or string.find(msg, "!старт") or string.find(msg, "!go") then
+                local customInterval = tonumber(string.match(msg, "!start%s+([%d%.]+)") or string.match(msg, "!старт%s+([%d%.]+)"))
+                if customInterval and customInterval >= 0.3 and customInterval <= 3.0 then
+                    ac.storage[STORAGE_KEY_INTERVAL] = string.format("%.2f", customInterval)
+                end
                 triggerStart()
                 return false
             elseif string.find(msg, "!cancel") or string.find(msg, "!сброс") or string.find(msg, "!stop") then
@@ -201,6 +226,39 @@ local function checkJudgeHotkey()
 end
 
 -- ====================================================================
+-- ОТРИСОВКА ДРИФТ-ЛАМПЫ С РЕАЛИСТИЧНОЙ ОПТИКОЙ И НЕОНОВЫМ BLOOM
+-- ====================================================================
+local function drawDriftLamp(centerX, centerY, radius, isLit, litCol, offCol, glowCol, haloRadius, isGreen, pulsePhase)
+    -- 1. Внешний корпус / металлический козырёк линзы (Titanium Rim)
+    ui.drawCircleFilled(vec2(centerX, centerY), radius + 3, rgbm(0.06, 0.07, 0.10, 0.98), 32)
+    ui.drawCircle(vec2(centerX, centerY), radius + 3, rgbm(0.25, 0.30, 0.38, 0.85), 32, 1.5)
+
+    -- 2. Тень козырька (Sun visor cowl)
+    ui.drawCircle(vec2(centerX, centerY + 1), radius + 2, rgbm(0.02, 0.02, 0.04, 0.95), 32, 2.0)
+
+    -- 3. Атмосферный неоновый Halo Bloom (при свечении)
+    if isLit then
+        local pulseExtra = isGreen and (math.sin(pulsePhase * 9.0) * 3.5) or 0
+        ui.drawCircleFilled(vec2(centerX, centerY), radius + haloRadius + pulseExtra, glowCol, 32)
+        ui.drawCircleFilled(vec2(centerX, centerY), radius + 5 + (pulseExtra * 0.5), litCol * 0.45, 32)
+    end
+
+    -- 4. Главная колба / рефлектор
+    local baseCol = isLit and litCol or offCol
+    ui.drawCircleFilled(vec2(centerX, centerY), radius, baseCol, 32)
+    ui.drawCircle(vec2(centerX, centerY), radius, rgbm(0.12, 0.15, 0.20, 0.9), 32, 1.2)
+
+    -- 5. Внутренняя оптика
+    if isLit then
+        local coreRadius = radius * 0.40
+        local coreCol = isGreen and rgbm(0.88, 1.0, 0.90, 0.98) or rgbm(1.0, 0.85, 0.85, 0.98)
+        ui.drawCircleFilled(vec2(centerX, centerY), coreRadius, coreCol, 24)
+    else
+        ui.drawCircleFilled(vec2(centerX - radius * 0.35, centerY - radius * 0.35), radius * 0.25, rgbm(1.0, 1.0, 1.0, 0.18), 16)
+    end
+end
+
+-- ====================================================================
 -- ОСНОВНОЙ РЕНДЕР СОДЕРЖИМОГО СВЕТОФОРА
 -- ====================================================================
 local function renderTreeContent(dt)
@@ -208,14 +266,14 @@ local function renderTreeContent(dt)
 
     local isHudOn = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
 
-    -- 1. Верхняя панель: Статус и кнопка Вкл/Выкл
+    -- 1. Верхняя панель в стиле дрифт-телеметрии
     if isHudOn then
-        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.2, 1.0, 0.4, 1.0))
-        ui.text("Светофор: ВКЛ")
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.20, 1.0, 0.45, 1.0))
+        ui.text("⚡ СВЕТОФОР СТАРТА")
         ui.popStyleColor()
 
         local availW = ui.availableSpaceX()
-        local btnW = 90
+        local btnW = 86
         if availW > (btnW + 20) then
             ui.sameLine(availW - btnW)
             if ui.button("Выключить##treeToggleOff", vec2(btnW, 20)) then
@@ -223,12 +281,12 @@ local function renderTreeContent(dt)
             end
         end
     else
-        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.8, 0.3, 0.3, 1.0))
-        ui.text("Светофор: ВЫКЛ")
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.85, 0.3, 0.3, 1.0))
+        ui.text("⚡ СВЕТОФОР СТАРТА (ВЫКЛ)")
         ui.popStyleColor()
 
         local availW = ui.availableSpaceX()
-        local btnW = 90
+        local btnW = 86
         if availW > (btnW + 20) then
             ui.sameLine(availW - btnW)
             if ui.button("Включить##treeToggleOn", vec2(btnW, 20)) then
@@ -236,84 +294,108 @@ local function renderTreeContent(dt)
             end
         end
         ui.separator()
-        ui.text("Светофор скрыт. Нажмите кнопку выше.")
+        ui.text("Светофор скрыт. Нажмите «Включить» выше.")
         return
     end
 
     ui.separator()
 
-    -- 2. Определение текущей фазы отсчета
+    -- 2. Определение текущей фазы отсчета с учетом настраиваемого интервала
+    local interval = state.stageInterval or tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
+    interval = math.clamp(interval, 0.3, 3.0)
+    local totalDur = interval * 3.0
+
     local timeLeft = state.timeLeft
-    local isStage = state.isActive and (timeLeft <= 3.0 and timeLeft > 2.0)
-    local red1    = state.isActive and (timeLeft <= 2.0 and timeLeft > 0)
-    local red2    = state.isActive and (timeLeft <= 1.0 and timeLeft > 0)
+    local isStage = state.isActive and (timeLeft <= (interval * 3.0) and timeLeft > (interval * 2.0))
+    local red1    = state.isActive and (timeLeft <= (interval * 2.0) and timeLeft > 0)
+    local red2    = state.isActive and (timeLeft <= interval and timeLeft > 0)
     local green   = state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
 
-    -- 3. Блок 3 ламп в темном боксе
+    -- 3. Карбоновый корпус светофора с металлическими винтами
     local cur = ui.getCursor()
-    local availW = math.max(ui.availableSpaceX(), 260)
-    local boxW = math.min(availW - 10, 280)
-    local boxH = 64
+    local availW = math.max(ui.availableSpaceX(), 280)
+    local boxW = math.min(availW - 6, 340)
+    local boxH = 74
     local boxX = cur.x + (availW - boxW) * 0.5
     local boxY = cur.y + 2
 
-    ui.drawRectFilled(vec2(boxX, boxY), vec2(boxX + boxW, boxY + boxH), rgbm(0.04, 0.05, 0.08, 0.95), 8)
+    ui.drawRectFilled(vec2(boxX, boxY), vec2(boxX + boxW, boxY + boxH), rgbm(0.03, 0.04, 0.06, 0.98), 10)
+    ui.drawRect(vec2(boxX, boxY), vec2(boxX + boxW, boxY + boxH), rgbm(0.22, 0.28, 0.36, 0.85), 10, nil, 1.5)
+    ui.drawRect(vec2(boxX + 2, boxY + 2), vec2(boxX + boxW - 2, boxY + boxH - 2), rgbm(0.08, 0.10, 0.14, 0.9), 8, nil, 1.0)
+
+    -- 4 винта по углам
+    local rOff = 6
+    local rR = 2.5
+    local rCol = rgbm(0.40, 0.45, 0.52, 0.85)
+    ui.drawCircleFilled(vec2(boxX + rOff, boxY + rOff), rR, rCol, 8)
+    ui.drawCircleFilled(vec2(boxX + boxW - rOff, boxY + rOff), rR, rCol, 8)
+    ui.drawCircleFilled(vec2(boxX + rOff, boxY + boxH - rOff), rR, rCol, 8)
+    ui.drawCircleFilled(vec2(boxX + boxW - rOff, boxY + boxH - rOff), rR, rCol, 8)
 
     local centerY = boxY + boxH * 0.5
     local lamp1X = boxX + boxW * 0.20
     local lamp2X = boxX + boxW * 0.50
     local lamp3X = boxX + boxW * 0.80
-    local radius = 18
+    local radius = 21
 
-    -- Лампа 1 (Красный 1)
-    local colR1 = red1 and rgbm(1.0, 0.08, 0.08, 1.0) or rgbm(0.22, 0.04, 0.04, 0.6)
-    ui.drawCircleFilled(vec2(lamp1X, centerY), radius, colR1, 24)
-    ui.drawCircle(vec2(lamp1X, centerY), radius, rgbm(0.45, 0.48, 0.55, 0.85), 24, 2)
-    if red1 then
-        ui.drawCircleFilled(vec2(lamp1X, centerY), radius + 6, rgbm(1.0, 0.0, 0.0, 0.38), 24)
-    end
+    -- Лампа 1 (Красный 1 / Готовность)
+    local colR1 = rgbm(1.0, 0.06, 0.06, 1.0)
+    local offR  = rgbm(0.18, 0.03, 0.03, 0.85)
+    local glowR = rgbm(1.0, 0.0, 0.0, 0.35)
+    drawDriftLamp(lamp1X, centerY, radius, red1, colR1, offR, glowR, 7, false, state.pulse)
 
-    -- Лампа 2 (Красный 2)
-    local colR2 = red2 and rgbm(1.0, 0.08, 0.08, 1.0) or rgbm(0.22, 0.04, 0.04, 0.6)
-    ui.drawCircleFilled(vec2(lamp2X, centerY), radius, colR2, 24)
-    ui.drawCircle(vec2(lamp2X, centerY), radius, rgbm(0.45, 0.48, 0.55, 0.85), 24, 2)
-    if red2 then
-        ui.drawCircleFilled(vec2(lamp2X, centerY), radius + 6, rgbm(1.0, 0.0, 0.0, 0.38), 24)
-    end
+    -- Лампа 2 (Красный 2 / Внимание)
+    drawDriftLamp(lamp2X, centerY, radius, red2, colR1, offR, glowR, 7, false, state.pulse)
 
-    -- Лампа 3 (Зеленый)
-    local colG = green and rgbm(0.08, 1.0, 0.25, 1.0) or rgbm(0.04, 0.22, 0.06, 0.6)
-    ui.drawCircleFilled(vec2(lamp3X, centerY), radius, colG, 24)
-    ui.drawCircle(vec2(lamp3X, centerY), radius, rgbm(0.45, 0.48, 0.55, 0.85), 24, 2)
-    if green then
-        ui.drawCircleFilled(vec2(lamp3X, centerY), radius + 7, rgbm(0.1, 1.0, 0.2, 0.50), 24)
-    end
+    -- Лампа 3 (Неоновый зеленый / Дрифт-Старт)
+    local colG  = rgbm(0.04, 1.0, 0.28, 1.0)
+    local offG  = rgbm(0.02, 0.16, 0.05, 0.85)
+    local glowG = rgbm(0.08, 1.0, 0.30, 0.48)
+    drawDriftLamp(lamp3X, centerY, radius, green, colG, offG, glowG, 9, true, state.pulse)
 
     ui.dummy(vec2(0, boxH + 8))
 
-    -- 4. Текстовый статус стадии старта
+    -- 4. Линейный индикатор прогресса отсчета
+    local barCur = ui.getCursor()
+    local barW = boxW
+    local barX = boxX
+    local barH = 4
+    ui.drawRectFilled(vec2(barX, barCur.y), vec2(barX + barW, barCur.y + barH), rgbm(0.08, 0.10, 0.14, 0.8), 2)
+    if state.isActive then
+        local progress = 1.0 - math.clamp(state.timeLeft / (state.totalDuration > 0 and state.totalDuration or 1.0), 0, 1)
+        local fillW = (green and 1.0 or progress) * barW
+        local barCol = green and rgbm(0.08, 1.0, 0.32, 1.0) or
+                       (red2 and rgbm(1.0, 0.2, 0.2, 1.0) or
+                       (red1 and rgbm(1.0, 0.55, 0.15, 1.0) or rgbm(1.0, 0.85, 0.1, 1.0)))
+        if fillW > 0 then
+            ui.drawRectFilled(vec2(barX, barCur.y), vec2(barX + fillW, barCur.y + barH), barCol, 2)
+        end
+    end
+    ui.dummy(vec2(0, barH + 4))
+
+    -- 5. Текстовый статус стадии старта с миллисекундами
     local statusText = "● ОЖИДАНИЕ СТАРТА"
-    local statusCol  = rgbm(0.70, 0.72, 0.78, 1.0)
+    local statusCol  = rgbm(0.70, 0.74, 0.80, 1.0)
 
     if green then
-        statusText = "★ СТАРТ!  GO!  GO!"
-        statusCol  = rgbm(0.1, 1.0, 0.3, 1.0)
+        statusText = "🟢 ⚡ ★ СТАРТ!  GO!  GO! ★ ⚡"
+        statusCol  = rgbm(0.12, 1.0, 0.35, 1.0)
     elseif red2 then
-        statusText = "● ВНИМАНИЕ (1 СЕК)"
-        statusCol  = rgbm(1.0, 0.3, 0.2, 1.0)
+        statusText = string.format("🔴 [ ВНИМАНИЕ ] 1 СЕК  (%.1fс)", math.max(0, timeLeft))
+        statusCol  = rgbm(1.0, 0.25, 0.20, 1.0)
     elseif red1 then
-        statusText = "● ГОТОВНОСТЬ (2 СЕК)"
-        statusCol  = rgbm(1.0, 0.55, 0.1, 1.0)
+        statusText = string.format("🔴 [ ГОТОВНОСТЬ ] 2 СЕК  (%.1fс)", math.max(0, timeLeft))
+        statusCol  = rgbm(1.0, 0.55, 0.12, 1.0)
     elseif isStage then
-        statusText = "● ПРИГОТОВИТЬСЯ (3 СЕК)"
-        statusCol  = rgbm(1.0, 0.9, 0.15, 1.0)
+        statusText = string.format("🟡 [ ПРИГОТОВИТЬСЯ ] 3 СЕК  (%.1fс)", math.max(0, timeLeft))
+        statusCol  = rgbm(1.0, 0.88, 0.15, 1.0)
     end
 
     ui.pushStyleColor(ui.StyleColor.Text, statusCol)
     ui.text(statusText)
     ui.popStyleColor()
 
-    -- 5. Управление судьи / Режим пилота
+    -- 6. Управление судьи / Режим пилота
     if isJudge() and not previewPilotMode then
         ui.separator()
         local spaceW = math.max(ui.availableSpaceX(), 180)
@@ -321,9 +403,9 @@ local function renderTreeContent(dt)
         local hotkey = getActiveHotkey()
 
         -- Кнопка СТАРТ (зеленая)
-        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.12, 0.55, 0.22, 0.95))
-        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.18, 0.72, 0.28, 1.0))
-        ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(0.22, 0.88, 0.35, 1.0))
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.58, 0.24, 0.95))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.15, 0.75, 0.30, 1.0))
+        ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(0.20, 0.90, 0.38, 1.0))
         if ui.button("▶ СТАРТ (" .. hotkey.short .. ")", vec2(btnW, 34)) then
             triggerStart()
         end
@@ -340,9 +422,41 @@ local function renderTreeContent(dt)
         end
         ui.popStyleColor(3)
 
-        -- Строка настроек горячей клавиши и переключения вида
-        ui.dummy(vec2(0, 4))
-        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.7, 0.75, 0.85, 1.0))
+        -- Панель настройки задержки светофора
+        ui.dummy(vec2(0, 2))
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.70, 0.76, 0.85, 1.0))
+        ui.text("Задержка ламп:")
+        ui.popStyleColor()
+
+        local currentInterval = tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
+
+        for i, p in ipairs(PRESETS) do
+            ui.sameLine()
+            local isSel = math.abs(currentInterval - p.val) < 0.03
+            if isSel then
+                ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.18, 0.55, 0.92, 0.95))
+            else
+                ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.18, 0.20, 0.25, 0.85))
+            end
+            if ui.button(p.label .. "##pBtn" .. i, vec2(58, 20)) then
+                ac.storage[STORAGE_KEY_INTERVAL] = string.format("%.2f", p.val)
+            end
+            ui.popStyleColor()
+        end
+
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.60, 0.65, 0.75, 1.0))
+        ui.text(string.format("Интервал: %.2fс (Всего: %.2fс)", currentInterval, currentInterval * 3.0))
+        ui.popStyleColor()
+        ui.sameLine(190)
+
+        ui.setNextItemWidth(ui.availableSpaceX() - 4)
+        local newInt, changed = ui.slider("##intervalSlider", currentInterval, 0.30, 2.00, "%.2f сек")
+        if changed or (newInt and math.abs(newInt - currentInterval) > 0.01) then
+            ac.storage[STORAGE_KEY_INTERVAL] = string.format("%.2f", newInt)
+        end
+
+        -- Строка горячей клавиши и переключения вида
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.70, 0.76, 0.85, 1.0))
         ui.text("Клавиша:")
         ui.popStyleColor()
         ui.sameLine()
@@ -352,7 +466,7 @@ local function renderTreeContent(dt)
             if item.id == hotkey.id then curIndex = idx; break end
         end
 
-        ui.setNextItemWidth(140)
+        ui.setNextItemWidth(130)
         if ui.combo("##hotkeySelect", HOTKEY_LIST[curIndex].short, ui.ComboFlags.HeightRegular, function()
             for idx, item in ipairs(HOTKEY_LIST) do
                 if ui.selectable(item.name, idx == curIndex) then
@@ -369,7 +483,7 @@ local function renderTreeContent(dt)
     elseif previewPilotMode then
         ui.separator()
         ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.3, 0.85, 1.0, 1.0))
-        ui.text("ℹ Режим предварительного просмотра (вид пилота)")
+        ui.text("ℹ Режим пилота (без судейских кнопок)")
         ui.popStyleColor()
         ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.55, 0.58, 0.65, 1.0))
         ui.text("Управление: Судья (Sergey Primo)")
@@ -393,8 +507,8 @@ local function renderFloatingHUD(dt)
     local isEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
     local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or 760
     local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or 40
-    local cardW = 360
-    local cardH = isEnabled and ((isJudge() and not previewPilotMode) and 260 or 165) or 60
+    local cardW = 380
+    local cardH = isEnabled and ((isJudge() and not previewPilotMode) and 290 or 175) or 60
 
     if not posInitialized then
         if ui.setNextWindowPosition then
@@ -410,8 +524,8 @@ local function renderFloatingHUD(dt)
 
     ui.pushStyleVar(ui.StyleVar.WindowRounding, 8)
     ui.pushStyleVar(ui.StyleVar.WindowBorderSize, 1.5)
-    ui.pushStyleColor(ui.StyleColor.WindowBg, rgbm(0.06, 0.08, 0.12, 0.94))
-    ui.pushStyleColor(ui.StyleColor.Border, rgbm(0.20, 0.55, 0.95, 0.75))
+    ui.pushStyleColor(ui.StyleColor.WindowBg, rgbm(0.04, 0.05, 0.07, 0.96))
+    ui.pushStyleColor(ui.StyleColor.Border, rgbm(0.20, 0.60, 0.95, 0.85))
 
     ui.begin("🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_HUD", winFlags, function()
         local curPos = ui.windowPos()
@@ -456,4 +570,4 @@ function script.update(dt)
     renderFloatingHUD(dt)
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v2.5")
+ac.log("[DriftStartTree] Track Extension HUD loaded v3.0 (Drift Edition)")

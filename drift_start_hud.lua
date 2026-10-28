@@ -5,6 +5,11 @@
 -- Версия: 3.1 (Drift Edition: Управление доступом судей и пилотов)
 -- ====================================================================
 
+if _G.DRIFT_START_HUD_INITIALIZED then
+    return
+end
+_G.DRIFT_START_HUD_INITIALIZED = true
+
 local GREEN_DURATION  = 2.5 -- Секунды горения зелёного света
 
 local STORAGE_KEY_POS_X          = "drift_tree_pos_x"
@@ -588,13 +593,14 @@ local function renderTreeContent(dt)
         if isMasterAdmin() then
             ui.sameLine()
             local btnText = showPermsPanel and "👥 Доступ ▲" or "👥 Доступ ▼"
-            if showPermsPanel then
+            local wasOpen = showPermsPanel
+            if wasOpen then
                 ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.20, 0.55, 0.85, 0.95))
             end
             if ui.button(btnText .. "##togglePermsBtn", vec2(85, 20)) then
                 showPermsPanel = not showPermsPanel
             end
-            if showPermsPanel then
+            if wasOpen then
                 ui.popStyleColor()
             end
         end
@@ -696,29 +702,43 @@ end
 -- ====================================================================
 local function renderFloatingHUD(dt)
     local isEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
-    local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or 760
+    if not isEnabled then return end
+
+    local cardW = 390
+    local cardH = (isJudge() and not previewPilotMode) and (showPermsPanel and 500 or 310) or 175
+
+    local defX = 765
+    pcall(function()
+        local uiState = ac.getUI()
+        if uiState and uiState.windowSize and uiState.windowSize.x > 200 then
+            defX = math.floor((uiState.windowSize.x - cardW) * 0.5)
+        end
+    end)
+
+    local savedX = tonumber(ac.storage[STORAGE_KEY_POS_X]) or defX
     local savedY = tonumber(ac.storage[STORAGE_KEY_POS_Y]) or 40
-    local cardW = 400
-    local cardH = isEnabled and ((isJudge() and not previewPilotMode) and (showPermsPanel and 480 or 310) or 175) or 60
 
-    if not posInitialized then
-        if ui.setNextWindowPosition then
-            ui.setNextWindowPosition(vec2(savedX, savedY))
-        end
-        if ui.setNextWindowSize then
-            ui.setNextWindowSize(vec2(cardW, cardH))
-        end
-        posInitialized = true
-    end
+    local winTitle = "🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_HUD"
 
-    local winFlags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
+    -- 1. Родной метод для плавающих панелей CSP (ui.toolWindow)
+    if ui.toolWindow then
+        ui.toolWindow(winTitle, vec2(savedX, savedY), vec2(cardW, cardH), false, true, function()
+            local curPos = ui.windowPos()
+            if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
+                ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
+                ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
+                savedX = curPos.x
+                savedY = curPos.y
+            end
 
-    ui.pushStyleVar(ui.StyleVar.WindowRounding, 8)
-    ui.pushStyleVar(ui.StyleVar.WindowBorderSize, 1.5)
-    ui.pushStyleColor(ui.StyleColor.WindowBg, rgbm(0.04, 0.05, 0.07, 0.96))
-    ui.pushStyleColor(ui.StyleColor.Border, rgbm(0.20, 0.60, 0.95, 0.85))
-
-    ui.begin("🚦 СВЕТОФОР | ГАЗДЕРЖИМ.РФ##DRIFT_START_HUD", winFlags, function()
+            local ok, err = pcall(renderTreeContent, dt)
+            if not ok and err then
+                ui.text("Ошибка: " .. tostring(err))
+            end
+        end)
+    -- 2. Резервный метод ui.beginTransparentWindow
+    elseif ui.beginTransparentWindow then
+        ui.beginTransparentWindow(winTitle, vec2(savedX, savedY), vec2(cardW, cardH), false, true)
         local curPos = ui.windowPos()
         if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
             ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
@@ -726,33 +746,47 @@ local function renderFloatingHUD(dt)
             savedX = curPos.x
             savedY = curPos.y
         end
-
         local ok, err = pcall(renderTreeContent, dt)
         if not ok and err then
-            ac.log("[DriftStartTree] Error in HUD: " .. tostring(err))
             ui.text("Ошибка: " .. tostring(err))
         end
-    end)
-
-    ui.popStyleColor(2)
-    ui.popStyleVar(2)
+        ui.endTransparentWindow()
+    -- 3. Резервный стандартный ImGui begin
+    elseif ui.begin then
+        local winFlags = bit.bor(ui.WindowFlags.NoCollapse, ui.WindowFlags.NoScrollbar)
+        ui.begin(winTitle, winFlags, function()
+            local curPos = ui.windowPos()
+            if curPos and (math.abs(curPos.x - savedX) > 2 or math.abs(curPos.y - savedY) > 2) then
+                ac.storage[STORAGE_KEY_POS_X] = tostring(math.floor(curPos.x))
+                ac.storage[STORAGE_KEY_POS_Y] = tostring(math.floor(curPos.y))
+                savedX = curPos.x
+                savedY = curPos.y
+            end
+            local ok, err = pcall(renderTreeContent, dt)
+            if not ok and err then
+                ui.text("Ошибка: " .. tostring(err))
+            end
+        end)
+    end
 end
 
 -- ====================================================================
--- ТОЧКА ВХОДА ТРЕКОВОГО СКРИПТА
+-- ТОЧКИ ВХОДА ДЛЯ СИСТЕМЫ CSP И СЕРВЕРА
 -- ====================================================================
-function script.update(dt)
-    frameCount = frameCount + 1
+local lastDrawFrame = -1
 
-    if not state.myDriverName or state.myDriverName == "" then
-        initPlayer()
+local function drawHUDPass(dt)
+    local curFrame = 0
+    pcall(function()
+        local sim = ac.getSim()
+        if sim and sim.frame then curFrame = sim.frame end
+    end)
+    if curFrame > 0 and curFrame == lastDrawFrame then
+        return
     end
+    lastDrawFrame = curFrame
 
-    if checkJudgeHotkey() then
-        triggerStart()
-    end
-
-    -- Проверяем активность отдельного окна CSP App (DriftStartTree.lua)
+    -- Не рисуем поверх отдельного открытого окна приложения DriftStartTree
     local lastAppTime = tonumber(ac.storage["drift_tree_app_active"] or 0) or 0
     if os.clock() - lastAppTime < 0.5 then
         return
@@ -761,4 +795,71 @@ function script.update(dt)
     renderFloatingHUD(dt)
 end
 
-ac.log("[DriftStartTree] Track Extension HUD loaded v3.1 (Permissions Edition)")
+-- 1. Нативный хук UI отрисовки для CSP Server Script / Track Script
+function script.drawUI()
+    drawHUDPass(0.016)
+end
+
+-- 2. Резервный хук Exclusive HUD (для скриптов, загруженных динамически)
+if ui.onExclusiveHUD then
+    pcall(function()
+        ui.onExclusiveHUD(function(mode)
+            drawHUDPass(0.016)
+            return 'apps-nonexclusive'
+        end)
+    end)
+end
+
+-- 3. Добавление светофора в боковое меню приложений AC (Apps Sidebar)
+if ui.addSettings then
+    pcall(function()
+        ui.addSettings({
+            icon = ui.Icons.Flag,
+            name = "Светофор Старта (ГАЗДЕРЖИМ)",
+            id = "drift_start_tree_app",
+            category = "main",
+            size = { default = vec2(380, 260), min = vec2(320, 160) },
+            flags = { "NoScrollbar" }
+        }, function()
+            ac.storage["drift_tree_app_active"] = tostring(os.clock())
+            renderTreeContent(0.016)
+        end)
+    end)
+end
+
+-- 4. Регистрация инструмента в верхней панели CSP (Online Extra)
+if ui.registerOnlineExtra then
+    pcall(function()
+        ui.registerOnlineExtra(
+            ui.Icons.Flag,
+            "Светофор Старта",
+            function() return true end,
+            function()
+                ac.storage["drift_tree_app_active"] = tostring(os.clock())
+                renderTreeContent(0.016)
+                return false
+            end,
+            nil,
+            ui.OnlineExtraFlags.Tool,
+            ui.WindowFlags.NoScrollbar,
+            vec2(380, 260)
+        )
+    end)
+end
+
+-- 5. Симуляционный цикл (БЕЗ UI ВЫЗОВОВ ВО ИЗБЕЖАНИЕ КРАША КРАСНОГО ТЕКСТА)
+function script.update(dt)
+    frameCount = frameCount + 1
+
+    advanceTimer(dt)
+
+    if not state.myDriverName or state.myDriverName == "" then
+        initPlayer()
+    end
+
+    if checkJudgeHotkey() then
+        triggerStart()
+    end
+end
+
+ac.log("[DriftStartTree] Track Extension HUD loaded v3.2 (Bulletproof Online Edition)")

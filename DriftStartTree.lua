@@ -592,13 +592,14 @@ local function renderTreeContent(dt)
         if isMasterAdmin() then
             ui.sameLine()
             local btnText = showPermsPanel and "👥 Доступ ▲" or "👥 Доступ ▼"
-            if showPermsPanel then
+            local wasOpen = showPermsPanel
+            if wasOpen then
                 ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.20, 0.55, 0.85, 0.95))
             end
             if ui.button(btnText .. "##togglePermsBtn", vec2(85, 20)) then
                 showPermsPanel = not showPermsPanel
             end
-            if showPermsPanel then
+            if wasOpen then
                 ui.popStyleColor()
             end
         end

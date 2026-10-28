@@ -181,16 +181,30 @@ local function revokeJudge(name)
     broadcastPermissions()
 end
 
--- Шаг таймера отсчета
-local function advanceTimer(dt)
-    if lastUpdateFrame == frameCount then return end
-    lastUpdateFrame = frameCount
+local lastTimerClock = -1
 
-    local step = math.clamp(dt or 0.016, 0.001, 0.1)
-    state.pulse = state.pulse + step
+-- Шаг таймера отсчета (высокоточный таймер на базе os.clock, не зависящий от frameCount)
+local function advanceTimer(dt)
+    local now = os.clock()
+    if lastTimerClock < 0 then
+        lastTimerClock = now
+        return
+    end
+
+    local delta = now - lastTimerClock
+    if delta < 0.0005 then
+        return
+    end
+    lastTimerClock = now
+
+    if delta > 0.25 then
+        delta = 0.016
+    end
+
+    state.pulse = state.pulse + delta
 
     if state.isActive then
-        state.timeLeft = state.timeLeft - step
+        state.timeLeft = state.timeLeft - delta
         if state.timeLeft < -GREEN_DURATION then
             state.isActive = false
             state.timeLeft = 0
@@ -200,10 +214,8 @@ end
 
 -- Запуск отсчета (Судья)
 local function triggerStart()
-    if serverDisabled then
-        ac.log("[DriftStartTree] Start blocked: traffic light is disabled on server")
-        return
-    end
+    -- Запуск старта судьёй гарантированно активирует светофор
+    serverDisabled = false
 
     local interval = tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
     interval = math.clamp(interval, 0.3, 3.0)
@@ -213,6 +225,7 @@ local function triggerStart()
     state.totalDuration = totalCountdown
     state.timeLeft = totalCountdown
     state.isActive = true
+    lastTimerClock = os.clock()
 
     local jList = {}
     for name, isAllowed in pairs(allowedJudges) do
@@ -268,10 +281,6 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
         end
     end
 
-    if data.serverDisabled ~= nil then
-        serverDisabled = (data.serverDisabled == true)
-    end
-
     if data.action == "server_disable" then
         serverDisabled = true
         state.isActive = false
@@ -280,24 +289,24 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
         return
     elseif data.action == "server_enable" then
         serverDisabled = false
+        state.isActive = false
+        state.timeLeft = 0
         ac.log("[DriftStartTree] Received SYNC: SERVER ENABLED BY JUDGE")
         return
-    end
-
-    if serverDisabled then
-        return
-    end
-
-    if data.action == "cancel" or (data.duration and tonumber(data.duration) <= 0) then
+    elseif data.action == "cancel" or (data.duration and tonumber(data.duration) <= 0) then
         state.isActive = false
         state.timeLeft = 0
         ac.log("[DriftStartTree] Received SYNC: STOP")
+        return
     elseif data.action == "start" or (data.duration and tonumber(data.duration) > 0) then
+        serverDisabled = false
         state.stageInterval = tonumber(data.interval) or 1.0
         state.totalDuration = tonumber(data.duration) or (state.stageInterval * 3.0)
         state.timeLeft = state.totalDuration
         state.isActive = true
+        lastTimerClock = os.clock()
         ac.log(string.format("[DriftStartTree] Received SYNC: START (total: %.2fs, step: %.2fs)", state.totalDuration, state.stageInterval))
+        return
     end
 end)
 
@@ -722,7 +731,6 @@ local function renderTreeContent(dt)
             end
             ui.popStyleColor(2)
         end
-        ui.popStyleColor(3)
 
         -- Панель настройки задержки светофора
         ui.dummy(vec2(0, 2))
@@ -1032,7 +1040,8 @@ local function drawHUDPass(dt)
 
     -- Не рисуем поверх отдельного открытого окна приложения DriftStartTree
     local lastAppTime = tonumber(ac.storage["drift_tree_app_active"] or 0) or 0
-    if os.clock() - lastAppTime < 0.5 then
+    local diff = os.clock() - lastAppTime
+    if diff >= 0 and diff < 0.5 then
         return
     end
 

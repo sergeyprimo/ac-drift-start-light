@@ -27,6 +27,7 @@ local prevHotkeyDown = false
 local previewPilotMode = false
 local showPermsPanel = false
 local manualPilotInput = ""
+local serverDisabled = false
 
 -- Доступные горячие клавиши для назначения
 local HOTKEY_LIST = {
@@ -199,6 +200,11 @@ end
 
 -- Запуск отсчета (Судья)
 local function triggerStart()
+    if serverDisabled then
+        ac.log("[DriftStartTree] Start blocked: traffic light is disabled on server")
+        return
+    end
+
     local interval = tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
     interval = math.clamp(interval, 0.3, 3.0)
     local totalCountdown = interval * 3.0
@@ -217,7 +223,8 @@ local function triggerStart()
         action = "start",
         duration = totalCountdown,
         interval = interval,
-        judges = jList
+        judges = jList,
+        serverDisabled = false
     })
 
     ac.log(string.format("[DriftStartTree] Countdown STARTED! Total: %.2fs (interval: %.2fs)", totalCountdown, interval))
@@ -229,10 +236,26 @@ local function cancelStart()
     state.isActive = false
 
     ac.broadcastSharedEvent("DRIFT_START_SYNC", {
-        action = "cancel"
+        action = "cancel",
+        serverDisabled = serverDisabled
     })
 
     ac.log("[DriftStartTree] Countdown CANCELLED")
+end
+
+-- Переключение глобального состояния светофора на сервере (Судья)
+local function toggleServerDisabled()
+    if not isJudge() then return end
+    serverDisabled = not serverDisabled
+    if serverDisabled then
+        state.isActive = false
+        state.timeLeft = 0
+    end
+    ac.broadcastSharedEvent("DRIFT_START_SYNC", {
+        action = serverDisabled and "server_disable" or "server_enable",
+        serverDisabled = serverDisabled
+    })
+    ac.log("[DriftStartTree] Broadcasted server " .. (serverDisabled and "DISABLE" or "ENABLE"))
 end
 
 -- Прием сетевого события от сервера / судьи (0 ms задержка)
@@ -243,6 +266,26 @@ ac.onSharedEvent("DRIFT_START_SYNC", function(data)
         for _, name in ipairs(data.judges) do
             allowedJudges[string.lower(name)] = true
         end
+    end
+
+    if data.serverDisabled ~= nil then
+        serverDisabled = (data.serverDisabled == true)
+    end
+
+    if data.action == "server_disable" then
+        serverDisabled = true
+        state.isActive = false
+        state.timeLeft = 0
+        ac.log("[DriftStartTree] Received SYNC: SERVER DISABLED BY JUDGE")
+        return
+    elseif data.action == "server_enable" then
+        serverDisabled = false
+        ac.log("[DriftStartTree] Received SYNC: SERVER ENABLED BY JUDGE")
+        return
+    end
+
+    if serverDisabled then
+        return
     end
 
     if data.action == "cancel" or (data.duration and tonumber(data.duration) <= 0) then
@@ -273,6 +316,14 @@ if ac.onChatMessage then
     ac.onChatMessage(function(message, senderCarIndex)
         if not message then return false end
         local msg = string.lower(message)
+
+        -- Команда переключения HUD для любого игрока
+        if string.find(msg, "!hud") or string.find(msg, "!tree") or string.find(msg, "!светофор") then
+            local cur = ac.storage[STORAGE_KEY_ENABLED]
+            ac.storage[STORAGE_KEY_ENABLED] = (cur == "0") and "1" or "0"
+            return false
+        end
+
         local senderName = ""
         if senderCarIndex and ac.getDriverName then
             local ok, nm = pcall(ac.getDriverName, senderCarIndex)
@@ -291,6 +342,17 @@ if ac.onChatMessage then
             local revokeTarget = string.match(msg, "!unjudge%s+(.+)") or string.match(msg, "!снять%s+(.+)")
             if revokeTarget then
                 revokeJudge(revokeTarget)
+                return false
+            end
+        end
+
+        -- Команды отключения/включения светофора на сервере (Судья)
+        if isAllowed then
+            if string.find(msg, "!disable") or string.find(msg, "!выкл") or string.find(msg, "!отключить") then
+                if not serverDisabled then toggleServerDisabled() end
+                return false
+            elseif string.find(msg, "!enable") or string.find(msg, "!вкл") or string.find(msg, "!включить") then
+                if serverDisabled then toggleServerDisabled() end
                 return false
             end
         end
@@ -314,7 +376,7 @@ end
 
 -- Проверка назначенной горячей клавиши для судьи
 local function checkJudgeHotkey()
-    if not isJudge() or previewPilotMode then return false end
+    if not isJudge() or previewPilotMode or serverDisabled then return false end
 
     local hotkey = getActiveHotkey()
     local isDown = false
@@ -375,24 +437,24 @@ local function renderTreeContent(dt)
 
     local isHudOn = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
 
-    -- 1. Если светофор полностью выключен (скрыт)
+    -- 1. Если светофор полностью выключен (отключен на экране)
     if not isHudOn then
         ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.85, 0.35, 0.35, 1.0))
-        ui.text("⚡ СВЕТОФОР (СКРЫТ)")
+        ui.text("⚡ СВЕТОФОР (ОТКЛЮЧЕН)")
         ui.popStyleColor()
 
         local availW = ui.availableSpaceX()
-        local btnW = 90
+        local btnW = 96
         if availW > (btnW + 10) then
             ui.sameLine(ui.getCursorX() + availW - btnW)
             ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.12, 0.55, 0.22, 0.90))
-            if ui.button("Показать##treeToggleOn", vec2(btnW, 20)) then
+            if ui.button("Включить##treeToggleOn", vec2(btnW, 20)) then
                 ac.storage[STORAGE_KEY_ENABLED] = "1"
             end
             ui.popStyleColor()
         end
         ui.separator()
-        ui.text("Светофор скрыт. Нажмите «Показать» выше.")
+        ui.text("Светофор отключен на вашем экране.")
         return
     end
 
@@ -402,10 +464,10 @@ local function renderTreeContent(dt)
     local totalDur = interval * 3.0
 
     local timeLeft = state.timeLeft
-    local isStage = state.isActive and (timeLeft <= (interval * 3.0) and timeLeft > (interval * 2.0))
-    local red1    = state.isActive and (timeLeft <= (interval * 2.0) and timeLeft > 0)
-    local red2    = state.isActive and (timeLeft <= interval and timeLeft > 0)
-    local green   = state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
+    local isStage = not serverDisabled and state.isActive and (timeLeft <= (interval * 3.0) and timeLeft > (interval * 2.0))
+    local red1    = not serverDisabled and state.isActive and (timeLeft <= (interval * 2.0) and timeLeft > 0)
+    local red2    = not serverDisabled and state.isActive and (timeLeft <= interval and timeLeft > 0)
+    local green   = not serverDisabled and state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
 
     local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
 
@@ -417,10 +479,14 @@ local function renderTreeContent(dt)
         ui.text("🚦 СВЕТОФОР")
         ui.popStyleColor()
 
-        ui.sameLine(90)
+        ui.sameLine(86)
 
         -- Миниатюрный статус светофора в одну строку
-        if state.isActive then
+        if serverDisabled then
+            ui.pushStyleColor(ui.StyleColor.Text, rgbm(1.0, 0.45, 0.15, 1.0))
+            ui.text("⚠️ ОТКЛЮЧЕН СУДЬЁЙ")
+            ui.popStyleColor()
+        elseif state.isActive then
             if green then
                 ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.05, 1.0, 0.28, 1.0))
                 ui.text("🟢 СТАРТ! ГАЗ В ПОЛ!")
@@ -446,12 +512,13 @@ local function renderTreeContent(dt)
 
         local availW = ui.availableSpaceX()
         local expandBtnW = 95
+        local offBtnW = 60
         local startBtnW = 62
 
         -- Кнопка быстрого старта прямо из свёрнутого режима (для судьи)
-        if isJudge() and not previewPilotMode then
-            if availW > (expandBtnW + startBtnW + 8) then
-                ui.sameLine(ui.getCursorX() + availW - (expandBtnW + startBtnW + 6))
+        if isJudge() and not previewPilotMode and not serverDisabled then
+            if availW > (expandBtnW + startBtnW + offBtnW + 12) then
+                ui.sameLine(ui.getCursorX() + availW - (expandBtnW + startBtnW + offBtnW + 8))
                 ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.62, 0.24, 0.95))
                 if ui.button("▶ СТАРТ##miniStart", vec2(startBtnW, 20)) then
                     triggerStart()
@@ -469,11 +536,21 @@ local function renderTreeContent(dt)
         end
         ui.popStyleColor(2)
 
+        ui.sameLine()
+
+        -- Кнопка «Отключить»
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.50, 0.18, 0.18, 0.85))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.70, 0.22, 0.22, 1.0))
+        if ui.button("⏻ Выкл##miniOffBtn", vec2(offBtnW, 20)) then
+            ac.storage[STORAGE_KEY_ENABLED] = "0"
+        end
+        ui.popStyleColor(2)
+
         return
     end
 
     -- ============================================================
-    -- ПОЛНЫЙ РАЗВЁРНУТЫЙ РЕЖИМ (ЗАГОЛОВОК С КНОПКОЙ СВЕРНУТЬ)
+    -- ПОЛНЫЙ РАЗВЁРНУТЫЙ РЕЖИМ (ЗАГОЛОВОК С КНОПКОЙ СВЕРНУТЬ И ОТКЛЮЧИТЬ)
     -- ============================================================
     ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.20, 1.0, 0.45, 1.0))
     ui.text("⚡ СВЕТОФОР СТАРТА")
@@ -481,7 +558,7 @@ local function renderTreeContent(dt)
 
     local availW = ui.availableSpaceX()
     local minBtnW = 86
-    local hideBtnW = 62
+    local hideBtnW = 86
 
     if availW > (minBtnW + hideBtnW + 12) then
         ui.sameLine(ui.getCursorX() + availW - (minBtnW + hideBtnW + 6))
@@ -496,10 +573,10 @@ local function renderTreeContent(dt)
 
         ui.sameLine()
 
-        -- Кнопка СКРЫТЬ
+        -- Кнопка ОТКЛЮЧИТЬ
         ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.50, 0.18, 0.18, 0.85))
         ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.70, 0.22, 0.22, 1.0))
-        if ui.button("✕ Скрыть##treeHideBtn", vec2(hideBtnW, 20)) then
+        if ui.button("⏻ Отключить##treeHideBtn", vec2(hideBtnW, 20)) then
             ac.storage[STORAGE_KEY_ENABLED] = "0"
         end
         ui.popStyleColor(2)
@@ -557,7 +634,7 @@ local function renderTreeContent(dt)
     local barX = boxX
     local barH = 4
     ui.drawRectFilled(vec2(barX, barCur.y), vec2(barX + barW, barCur.y + barH), rgbm(0.08, 0.10, 0.14, 0.8), 2)
-    if state.isActive then
+    if state.isActive and not serverDisabled then
         local progress = 1.0 - math.clamp(state.timeLeft / (state.totalDuration > 0 and state.totalDuration or 1.0), 0, 1)
         local fillW = (green and 1.0 or progress) * barW
         local barCol = green and rgbm(0.08, 1.0, 0.32, 1.0) or
@@ -573,7 +650,10 @@ local function renderTreeContent(dt)
     local statusText = "● ОЖИДАНИЕ СТАРТА"
     local statusCol  = rgbm(0.70, 0.74, 0.80, 1.0)
 
-    if green then
+    if serverDisabled then
+        statusText = "⚠️ СВЕТОФОР ОТКЛЮЧЕН СУДЬЁЙ НА СЕРВЕРЕ"
+        statusCol  = rgbm(1.0, 0.45, 0.15, 1.0)
+    elseif green then
         statusText = "🟢 ⚡ ★ СТАРТ!  GO!  GO! ★ ⚡"
         statusCol  = rgbm(0.12, 1.0, 0.35, 1.0)
     elseif red2 then
@@ -599,13 +679,19 @@ local function renderTreeContent(dt)
         local hotkey = getActiveHotkey()
 
         -- Кнопка СТАРТ (зеленая)
-        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.58, 0.24, 0.95))
-        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.15, 0.75, 0.30, 1.0))
-        ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(0.20, 0.90, 0.38, 1.0))
-        if ui.button("▶ СТАРТ (" .. hotkey.short .. ")", vec2(btnW, 34)) then
-            triggerStart()
+        if serverDisabled then
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.25, 0.28, 0.32, 0.60))
+            ui.button("▶ СТАРТ (ОТКЛЮЧЕН)", vec2(btnW, 34))
+            ui.popStyleColor()
+        else
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.58, 0.24, 0.95))
+            ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.15, 0.75, 0.30, 1.0))
+            ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(0.20, 0.90, 0.38, 1.0))
+            if ui.button("▶ СТАРТ (" .. hotkey.short .. ")", vec2(btnW, 34)) then
+                triggerStart()
+            end
+            ui.popStyleColor(3)
         end
-        ui.popStyleColor(3)
 
         ui.sameLine(btnW + 14)
 
@@ -615,6 +701,26 @@ local function renderTreeContent(dt)
         ui.pushStyleColor(ui.StyleColor.ButtonActive, rgbm(0.95, 0.25, 0.25, 1.0))
         if ui.button("✖ СБРОС", vec2(btnW, 34)) then
             cancelStart()
+        end
+        ui.popStyleColor(3)
+
+        -- Кнопка ГЛОБАЛЬНОГО отключения/включения светофора на сервере
+        ui.dummy(vec2(0, 2))
+        local fullW = math.max(ui.availableSpaceX(), 200)
+        if serverDisabled then
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.12, 0.58, 0.24, 0.95))
+            ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.18, 0.75, 0.32, 1.0))
+            if ui.button("🟢 ВКЛЮЧИТЬ СВЕТОФОР НА СЕРВЕРЕ##srvToggle", vec2(fullW, 26)) then
+                toggleServerDisabled()
+            end
+            ui.popStyleColor(2)
+        else
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.55, 0.16, 0.16, 0.90))
+            ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.72, 0.20, 0.20, 1.0))
+            if ui.button("🔴 ОТКЛЮЧИТЬ СВЕТОФОР НА СЕРВЕРЕ##srvToggle", vec2(fullW, 26)) then
+                toggleServerDisabled()
+            end
+            ui.popStyleColor(2)
         end
         ui.popStyleColor(3)
 
@@ -786,15 +892,63 @@ local function renderTreeContent(dt)
 end
 
 -- ====================================================================
+-- МИНИМАЛИСТИЧНЫЙ ПИЛЮЛЬ-ИНДИКАТОР ВОССТАНОВЛЕНИЯ HUD
+-- ====================================================================
+local function renderRestorePill()
+    local winTitle = "DRIFT_START_PILL"
+    local winFlags = bit.bor(
+        ui.WindowFlags.NoTitleBar,
+        ui.WindowFlags.NoScrollbar,
+        ui.WindowFlags.NoCollapse,
+        ui.WindowFlags.NoNav,
+        ui.WindowFlags.NoFocusOnAppearing,
+        ui.WindowFlags.NoBringToFrontOnFocus
+    )
+    local pillW = 180
+    local pillH = 26
+    local pillX = 870
+    pcall(function()
+        local uiState = ac.getUI()
+        if uiState and uiState.windowSize and uiState.windowSize.x > 200 then
+            pillX = math.floor((uiState.windowSize.x - pillW) * 0.5)
+        end
+    end)
+    local pillY = 10
+
+    if ui.beginTransparentWindow then
+        ui.beginTransparentWindow(winTitle, vec2(pillX, pillY), vec2(pillW, pillH), false, winFlags)
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.40, 0.20, 0.85))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.15, 0.60, 0.30, 0.98))
+        if ui.button("🚦 Включить светофор##pillOn", vec2(pillW - 8, 20)) then
+            ac.storage[STORAGE_KEY_ENABLED] = "1"
+        end
+        ui.popStyleColor(2)
+        ui.endTransparentWindow()
+    elseif ui.begin then
+        ui.begin(winTitle, winFlags, function()
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.40, 0.20, 0.85))
+            ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.15, 0.60, 0.30, 0.98))
+            if ui.button("🚦 Включить светофор##pillOn", vec2(pillW - 8, 20)) then
+                ac.storage[STORAGE_KEY_ENABLED] = "1"
+            end
+            ui.popStyleColor(2)
+        end)
+    end
+end
+
+-- ====================================================================
 -- РЕНДЕР ПЛАВАЮЩЕГО HUD ДЛЯ УЧАСТНИКОВ НА СЕРВЕРЕ
 -- ====================================================================
 local function renderFloatingHUD(dt)
     local isEnabled = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
-    if not isEnabled then return end
+    if not isEnabled then
+        renderRestorePill()
+        return
+    end
 
     local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
-    local cardW = isMinimized and (isJudge() and not previewPilotMode and 380 or 300) or 390
-    local cardH = isMinimized and 56 or ((isJudge() and not previewPilotMode) and (showPermsPanel and 500 or 310) or 175)
+    local cardW = isMinimized and (isJudge() and not previewPilotMode and 410 or 300) or 390
+    local cardH = isMinimized and 56 or ((isJudge() and not previewPilotMode) and (showPermsPanel and 535 or 345) or 175)
 
     local defX = 765
     pcall(function()

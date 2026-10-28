@@ -10,6 +10,7 @@ local GREEN_DURATION  = 2.5 -- Секунды горения зелёного с
 local STORAGE_KEY_POS_X          = "drift_tree_pos_x"
 local STORAGE_KEY_POS_Y          = "drift_tree_pos_y"
 local STORAGE_KEY_ENABLED        = "drift_tree_enabled"
+local STORAGE_KEY_MINIMIZED      = "drift_tree_minimized"
 local STORAGE_KEY_HOTKEY         = "drift_tree_hotkey"
 local STORAGE_KEY_INTERVAL       = "drift_tree_interval"
 local STORAGE_KEY_ALLOWED_JUDGES = "drift_tree_allowed_judges"
@@ -373,41 +374,28 @@ local function renderTreeContent(dt)
 
     local isHudOn = (ac.storage[STORAGE_KEY_ENABLED] ~= "0")
 
-    -- 1. Верхняя панель в стиле дрифт-телеметрии
-    if isHudOn then
-        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.20, 1.0, 0.45, 1.0))
-        ui.text("⚡ СВЕТОФОР СТАРТА")
+    -- 1. Если светофор полностью выключен (скрыт)
+    if not isHudOn then
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.85, 0.35, 0.35, 1.0))
+        ui.text("⚡ СВЕТОФОР (СКРЫТ)")
         ui.popStyleColor()
 
         local availW = ui.availableSpaceX()
-        local btnW = 86
-        if availW > (btnW + 20) then
-            ui.sameLine(availW - btnW)
-            if ui.button("Выключить##treeToggleOff", vec2(btnW, 20)) then
-                ac.storage[STORAGE_KEY_ENABLED] = "0"
-            end
-        end
-    else
-        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.85, 0.3, 0.3, 1.0))
-        ui.text("⚡ СВЕТОФОР СТАРТА (ВЫКЛ)")
-        ui.popStyleColor()
-
-        local availW = ui.availableSpaceX()
-        local btnW = 86
-        if availW > (btnW + 20) then
-            ui.sameLine(availW - btnW)
-            if ui.button("Включить##treeToggleOn", vec2(btnW, 20)) then
+        local btnW = 90
+        if availW > (btnW + 10) then
+            ui.sameLine(ui.getCursorX() + availW - btnW)
+            ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.12, 0.55, 0.22, 0.90))
+            if ui.button("Показать##treeToggleOn", vec2(btnW, 20)) then
                 ac.storage[STORAGE_KEY_ENABLED] = "1"
             end
+            ui.popStyleColor()
         end
         ui.separator()
-        ui.text("Светофор скрыт. Нажмите «Включить» выше.")
+        ui.text("Светофор скрыт. Нажмите «Показать» выше.")
         return
     end
 
-    ui.separator()
-
-    -- 2. Определение текущей фазы отсчета с учетом настраиваемого интервала
+    -- Определение фаз отсчета
     local interval = state.stageInterval or tonumber(ac.storage[STORAGE_KEY_INTERVAL]) or 1.0
     interval = math.clamp(interval, 0.3, 3.0)
     local totalDur = interval * 3.0
@@ -417,6 +405,106 @@ local function renderTreeContent(dt)
     local red1    = state.isActive and (timeLeft <= (interval * 2.0) and timeLeft > 0)
     local red2    = state.isActive and (timeLeft <= interval and timeLeft > 0)
     local green   = state.isActive and (timeLeft <= 0 and timeLeft > -GREEN_DURATION)
+
+    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
+
+    -- ============================================================
+    -- КОМПАКТНЫЙ СВЁРНУТЫЙ РЕЖИМ (МИНИ-ПАНЕЛЬ)
+    -- ============================================================
+    if isMinimized then
+        ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.25, 0.90, 1.0, 1.0))
+        ui.text("🚦 СВЕТОФОР")
+        ui.popStyleColor()
+
+        ui.sameLine(90)
+
+        -- Миниатюрный статус светофора в одну строку
+        if state.isActive then
+            if green then
+                ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.05, 1.0, 0.28, 1.0))
+                ui.text("🟢 СТАРТ! ГАЗ В ПОЛ!")
+                ui.popStyleColor()
+            elseif red2 then
+                ui.pushStyleColor(ui.StyleColor.Text, rgbm(1.0, 0.15, 0.15, 1.0))
+                ui.text("🔴 🔴 ВНИМАНИЕ...")
+                ui.popStyleColor()
+            elseif red1 then
+                ui.pushStyleColor(ui.StyleColor.Text, rgbm(1.0, 0.20, 0.20, 1.0))
+                ui.text("🔴 ГОТОВНОСТЬ...")
+                ui.popStyleColor()
+            elseif isStage then
+                ui.pushStyleColor(ui.StyleColor.Text, rgbm(1.0, 0.80, 0.10, 1.0))
+                ui.text("🟡 ПРЕ-СТАЙДЖ")
+                ui.popStyleColor()
+            end
+        else
+            ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.55, 0.60, 0.70, 1.0))
+            ui.text("● ОЖИДАНИЕ")
+            ui.popStyleColor()
+        end
+
+        local availW = ui.availableSpaceX()
+        local expandBtnW = 95
+        local startBtnW = 62
+
+        -- Кнопка быстрого старта прямо из свёрнутого режима (для судьи)
+        if isJudge() and not previewPilotMode then
+            if availW > (expandBtnW + startBtnW + 8) then
+                ui.sameLine(ui.getCursorX() + availW - (expandBtnW + startBtnW + 6))
+                ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.10, 0.62, 0.24, 0.95))
+                if ui.button("▶ СТАРТ##miniStart", vec2(startBtnW, 20)) then
+                    triggerStart()
+                end
+                ui.popStyleColor()
+                ui.sameLine()
+            end
+        end
+
+        -- Кнопка «Развернуть»
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.18, 0.45, 0.85, 0.90))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.25, 0.55, 0.95, 1.0))
+        if ui.button("⤢ Развернуть##treeExpand", vec2(expandBtnW, 20)) then
+            ac.storage[STORAGE_KEY_MINIMIZED] = "0"
+        end
+        ui.popStyleColor(2)
+
+        return
+    end
+
+    -- ============================================================
+    -- ПОЛНЫЙ РАЗВЁРНУТЫЙ РЕЖИМ (ЗАГОЛОВОК С КНОПКОЙ СВЕРНУТЬ)
+    -- ============================================================
+    ui.pushStyleColor(ui.StyleColor.Text, rgbm(0.20, 1.0, 0.45, 1.0))
+    ui.text("⚡ СВЕТОФОР СТАРТА")
+    ui.popStyleColor()
+
+    local availW = ui.availableSpaceX()
+    local minBtnW = 86
+    local hideBtnW = 62
+
+    if availW > (minBtnW + hideBtnW + 12) then
+        ui.sameLine(ui.getCursorX() + availW - (minBtnW + hideBtnW + 6))
+
+        -- Кнопка СВЕРНУТЬ
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.20, 0.35, 0.55, 0.85))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.25, 0.45, 0.75, 1.0))
+        if ui.button("─ Свернуть##treeMinBtn", vec2(minBtnW, 20)) then
+            ac.storage[STORAGE_KEY_MINIMIZED] = "1"
+        end
+        ui.popStyleColor(2)
+
+        ui.sameLine()
+
+        -- Кнопка СКРЫТЬ
+        ui.pushStyleColor(ui.StyleColor.Button, rgbm(0.50, 0.18, 0.18, 0.85))
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, rgbm(0.70, 0.22, 0.22, 1.0))
+        if ui.button("✕ Скрыть##treeHideBtn", vec2(hideBtnW, 20)) then
+            ac.storage[STORAGE_KEY_ENABLED] = "0"
+        end
+        ui.popStyleColor(2)
+    end
+
+    ui.separator()
 
     -- 3. Карбоновый корпус светофора с металлическими винтами
     local cur = ui.getCursor()
@@ -702,6 +790,14 @@ end
 function script.windowMain(dt)
     frameCount = frameCount + 1
     ac.storage["drift_tree_app_active"] = tostring(os.clock())
+
+    local isMinimized = (ac.storage[STORAGE_KEY_MINIMIZED] == "1")
+    local cardW = isMinimized and (isJudge() and not previewPilotMode and 380 or 300) or 390
+    local cardH = isMinimized and 56 or ((isJudge() and not previewPilotMode) and (showPermsPanel and 500 or 310) or 175)
+
+    if ui.setNextWindowSize then
+        ui.setNextWindowSize(vec2(cardW, cardH))
+    end
 
     local ok, err = pcall(renderTreeContent, dt)
     if not ok and err then
